@@ -1,0 +1,25 @@
+@'
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.DS_Store
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editors/IDE
+.vscode/
+.idea/
+
+# Project outputs & runtime data
+data/waveforms/
+data/stations/
+data/events/
+checkpoints/
+output/
+logs/
+'@ | Out-File -Encoding UTF8 .gitignore
