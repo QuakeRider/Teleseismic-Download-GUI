@@ -9,6 +9,7 @@ This application provides a simplified interface for:
 - **Event Selection**: Search earthquake catalogs with distance-based filtering and dynamic magnitude-depth cutoffs
 - **Waveform Download**: Bulk download seismic waveforms with progress tracking and retry logic
 
+Current Version: V 1.0
 
 ## Features
 
@@ -183,9 +184,7 @@ See `requirements.txt` for full list with version constraints.
    - Verify phases and velocity model
    - Check distance range and event depths
 
-## Future Enhancements
-
-Potential improvements for this standalone tool:
+## Planned Future Enhancements
 - Export station/event lists to CSV
 - Import existing station/event lists
 - Parallel downloads using multiprocessing
@@ -194,6 +193,15 @@ Potential improvements for this standalone tool:
 - Data availability checks before download
 - Resume interrupted downloads
 
+## Known issues to fix in a future version
+- Event locations not plotting.
+- Circles on Events pane not displaying as wrapping around planet. Some events are out of the circles when they should be.
+- Merge compute ROI center into the Search button so it is automatically calculated.
+- Adding the ability to chose the output file name style.
+- Station symbols not scaling with zoom.
+- Start and End times not carrying over from the Stations tab to the Events tab.
+- Only one provider can be chosen during the download process.
+  
 ## License
 
 This tool is provided as-is for seismic data acquisition and research purposes.
