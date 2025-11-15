@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
+        self.project_tab = self._build_project_tab()
         self.station_tab = self._build_station_tab()
         self.event_tab = self._build_event_tab()
         self.download_tab = self._build_download_tab()
@@ -101,6 +102,7 @@ class MainWindow(QMainWindow):
         self.ev_start_dt.dateTimeChanged.connect(self._disable_time_sync)
         self.ev_end_dt.dateTimeChanged.connect(self._disable_time_sync)
 
+        self.tabs.addTab(self.project_tab, "Project")
         self.tabs.addTab(self.station_tab, "Stations")
         self.tabs.addTab(self.event_tab, "Events")
         self.tabs.addTab(self.download_tab, "Download")
@@ -112,6 +114,82 @@ class MainWindow(QMainWindow):
 
         self._workers = []  # Keep references to worker threads
         self.logger.info("GUI initialized.")
+
+    # ------------------------
+    # Project Tab
+    # ------------------------
+    def _build_project_tab(self) -> QWidget:
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        form = QFormLayout()
+
+        # Project directory picker
+        self.project_dir_input = QLineEdit("")
+        btn_browse_proj = QPushButton("Browse…")
+        def _browse_proj():
+            path = QFileDialog.getExistingDirectory(self, "Select Project Directory")
+            if path:
+                self.project_dir_input.setText(path)
+        btn_browse_proj.clicked.connect(_browse_proj)
+        row = QHBoxLayout(); row.addWidget(self.project_dir_input); row.addWidget(btn_browse_proj)
+        form.addRow(QLabel("Project directory:"), self._wrap(row))
+
+        # Initialize/apply button
+        self.btn_init_project = QPushButton("Initialize/Use Project")
+        self.chk_set_waveforms_output = QCheckBox("Set Download output to <project>/data")
+        self.chk_set_waveforms_output.setChecked(True)
+        btns = QHBoxLayout(); btns.addWidget(self.btn_init_project); btns.addWidget(self.chk_set_waveforms_output)
+        form.addRow(self._wrap(btns))
+
+        # Derived paths preview (labels)
+        self.lbl_paths_preview = QLabel("")
+        form.addRow(QLabel("Paths preview:"), self.lbl_paths_preview)
+
+        layout.addLayout(form)
+
+        def _update_preview(path: str):
+            if not path:
+                self.lbl_paths_preview.setText("")
+                return
+            from pathlib import Path
+            p = Path(path)
+            preview = f"\nStations CSV: {p / 'data' / 'stations' / 'stations.csv'}\n" \
+                      f"Events CSV:   {p / 'data' / 'events' / 'events.csv'}\n" \
+                      f"StationXML:   {p / 'data' / 'stationxml'}\n" \
+                      f"Waveforms:    {p / 'data' / 'waveforms'}"
+            self.lbl_paths_preview.setText(preview)
+
+        self.project_dir_input.textChanged.connect(lambda _: _update_preview(self.project_dir_input.text().strip()))
+        _update_preview("")
+
+        def _init_project():
+            path = self.project_dir_input.text().strip()
+            if not path:
+                QMessageBox.warning(self, "Project", "Please select a project directory.")
+                return
+            ok = self.data_manager.initialize_project(path)
+            if ok:
+                # Set logs path for GUI logger
+                try:
+                    log_file = str((self.data_manager.project_dir / 'output' / 'logs' / 'session.log'))
+                    # Recreate logger to include file (optional)
+                    # self.logger = setup_logger('downloader_gui', log_widget=self.log_text, log_file=log_file, level=self.logger.level)
+                    self.logger.info(f"Using project directory: {self.data_manager.project_dir}")
+                except Exception:
+                    pass
+                if self.chk_set_waveforms_output.isChecked():
+                    try:
+                        default_wave_dir = str(self.data_manager.project_dir / 'data')
+                        self.output_dir.setText(default_wave_dir)
+                    except Exception:
+                        pass
+                QMessageBox.information(self, "Project", "Project directory set.")
+                _update_preview(path)
+            else:
+                QMessageBox.critical(self, "Project", "Failed to initialize project directory.")
+        self.btn_init_project.clicked.connect(_init_project)
+
+        return w
 
     # ------------------------
     # Station Tab
@@ -273,7 +351,19 @@ class MainWindow(QMainWindow):
     def _on_save_stations(self):
         self.data_manager.set_stations(self.stations)
         self.data_manager.save_checkpoint("stations")
-        QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project.")
+        # Export CSV and StationXML if project_dir is set
+        try:
+            proj = self.data_manager.project_dir
+            if proj:
+                stations_csv = proj / 'data' / 'stations' / 'stations.csv'
+                self.data_manager.export_stations_csv(str(stations_csv))
+                # Save StationXML files
+                sx_dir = proj / 'data' / 'stationxml'
+                count = self.station_service.save_stationxml(self.stations, str(sx_dir))
+                self.logger.info(f"Saved stations CSV and {count} StationXML files.")
+        except Exception as e:
+            self.logger.warning(f"Could not export stations CSV/StationXML: {e}")
+        QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (CSV + StationXML).")
 
     # ------------------------
     # Event Tab
@@ -429,7 +519,16 @@ class MainWindow(QMainWindow):
     def _on_save_events(self):
         self.data_manager.set_events(self.events)
         self.data_manager.save_checkpoint("events")
-        QMessageBox.information(self, "Saved", f"Saved {len(self.events)} events to project.")
+        # Export CSV if project_dir is set
+        try:
+            proj = self.data_manager.project_dir
+            if proj:
+                events_csv = proj / 'data' / 'events' / 'events.csv'
+                self.data_manager.export_events_csv(str(events_csv))
+                self.logger.info("Saved events CSV.")
+        except Exception as e:
+            self.logger.warning(f"Could not export events CSV: {e}")
+        QMessageBox.information(self, "Saved", f"Saved {len(self.events)} events to project (CSV).")
 
     # ------------------------
     # Download Tab

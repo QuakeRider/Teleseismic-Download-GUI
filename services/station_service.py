@@ -371,3 +371,37 @@ class StationService:
     def shutdown(self):
         """Shutdown executor"""
         self.executor.shutdown(wait=True)
+
+    def save_stationxml(
+        self,
+        stations: List[dict],
+        output_dir: str,
+        level: str = 'response',
+        timeout: int = 120
+    ) -> int:
+        """
+        Fetch and save StationXML files (Inventory) for given stations.
+        Saved as <NET>.<STA>.xml under output_dir.
+
+        Returns number of files saved.
+        """
+        from pathlib import Path
+        saved = 0
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        seen = set()
+        for s in stations:
+            key = f"{s['network']}.{s['station']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                provider = s.get('provider', 'IRIS')
+                client_name = self.PROVIDER_ENDPOINTS.get(provider, 'IRIS')
+                client = Client(client_name, timeout=timeout)
+                inv = client.get_stations(network=s['network'], station=s['station'], level=level)
+                out_path = Path(output_dir) / f"{key}.xml"
+                inv.write(str(out_path), format='STATIONXML')
+                saved += 1
+            except Exception as e:
+                self.logger.warning(f"StationXML fetch failed for {key}: {e}")
+        return saved

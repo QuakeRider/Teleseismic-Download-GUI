@@ -420,6 +420,8 @@ class WaveformDownloader:
         """
         try:
             output_path = Path(output_dir)
+            # Save under 'waveforms' subdirectory for organization
+            output_path = output_path / 'waveforms'
             output_path.mkdir(parents=True, exist_ok=True)
             
             # Group traces by event_id if available, else fallback to starttime

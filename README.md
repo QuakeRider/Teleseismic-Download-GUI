@@ -137,17 +137,30 @@ seismic-data-downloader/
 
 ## Output
 
-Downloaded data is organized by event ID:
+By default, a project initialized with the downloader uses this structure:
 ```
-<output_dir>/
-├── <event_id_sanitized>/
-│   ├── NET.STA.LOC.CHA.sac (or .mseed)
-│   └── ...
-└── ...
+project/
+├── data/
+│   ├── waveforms/                 # Waveform files organized by event ID
+│   │   └── <event_id_sanitized>/
+│   │       ├── NET.STA.LOC.CHA.sac (or .mseed)
+│   │       └── ...
+│   ├── events/
+│   │   └── events.csv             # Tabular event list for downstream tools
+│   ├── stations/
+│   │   └── stations.csv           # Tabular station list for downstream tools
+│   └── stationxml/
+│       └── NET.STA.xml            # Station response XML files (one per station)
+├── output/
+│   └── logs/
+└── checkpoints/
 ```
+If you choose a custom output directory in the Download tab, waveforms will be saved under `<output_dir>/waveforms/` following the same event-based layout.
+
 Notes:
 - Invalid characters in event IDs are sanitized for filesystem safety (e.g., `?` → `_`).
 - If an event ID is unavailable, a time-based folder is used as a fallback.
+- StationXML files include instrument responses used later by seismic-rf-gui for deconvolution.
 
 ## Dependencies
 
