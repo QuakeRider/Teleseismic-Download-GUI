@@ -206,6 +206,7 @@ Potential improvements for this standalone tool:
 - Waveform preview plots
 - Data availability checks before download
 - Resume interrupted downloads
+- Within download tab: select the type of analysis that is being done (RF, Atten, etc) and provide suggested download parameters (Window times, channel types, etc)
 
 ## License
 
