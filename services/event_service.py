@@ -155,6 +155,68 @@ class EventService:
         self.progress_manager = progress_manager
         self.logger = logger
     
+    def _extract_moment_tensor(self, event) -> Optional[Dict]:
+        """Extract moment tensor and focal mechanism info from an ObsPy Event, if available.
+
+        The returned dictionary is JSON-serializable and may contain:
+        - tensor: dict with m_rr, m_tt, m_pp, m_rt, m_rp, m_tp (if present)
+        - scalar_moment: scalar moment value (if present)
+        - nodal_planes: list of nodal plane dictionaries with strike/dip/rake
+        """
+        try:
+            fm = None
+            try:
+                fm = event.preferred_focal_mechanism()
+            except Exception:
+                fm = None
+            if fm is None and getattr(event, "focal_mechanisms", None):
+                fm = event.focal_mechanisms[0]
+            if fm is None:
+                return None
+
+            info: Dict[str, object] = {}
+
+            mt = getattr(fm, "moment_tensor", None)
+            if mt is not None:
+                tensor = getattr(mt, "tensor", None)
+                tensor_dict: Dict[str, float] = {}
+                if tensor is not None:
+                    for comp in ("m_rr", "m_tt", "m_pp", "m_rt", "m_rp", "m_tp"):
+                        val = getattr(tensor, comp, None)
+                        if val is not None:
+                            tensor_dict[comp] = float(val)
+                if tensor_dict:
+                    info["tensor"] = tensor_dict
+                scalar_moment = getattr(mt, "scalar_moment", None)
+                if scalar_moment is not None:
+                    info["scalar_moment"] = float(scalar_moment)
+
+            nodal_planes = []
+            np_obj = getattr(fm, "nodal_planes", None)
+            if np_obj is not None:
+                for plane_name in ("nodal_plane_1", "nodal_plane_2"):
+                    plane = getattr(np_obj, plane_name, None)
+                    if plane is not None:
+                        nodal_planes.append({
+                            "name": plane_name,
+                            "strike": float(getattr(plane, "strike", 0.0)) if getattr(plane, "strike", None) is not None else None,
+                            "dip": float(getattr(plane, "dip", 0.0)) if getattr(plane, "dip", None) is not None else None,
+                            "rake": float(getattr(plane, "rake", 0.0)) if getattr(plane, "rake", None) is not None else None,
+                        })
+            if nodal_planes:
+                info["nodal_planes"] = nodal_planes
+
+            if not info:
+                return None
+            return info
+        except Exception as exc:
+            try:
+                ev_id = str(getattr(event, "resource_id", ""))
+            except Exception:
+                ev_id = "unknown"
+            self.logger.debug(f"Could not extract moment tensor for event {ev_id}: {exc}")
+            return None
+    
     def search_events(
         self,
         catalog_source: str,
@@ -246,6 +308,12 @@ class EventService:
                         'distance_deg': round(distance_deg, 2),
                         'catalog_source': catalog_source
                     }
+
+                    # Attach moment tensor / focal mechanism info if available
+                    mt_info = self._extract_moment_tensor(event)
+                    if mt_info is not None:
+                        event_dict['moment_tensor'] = mt_info
+
                     events_with_distance.append(event_dict)
                 
                 # Update progress

@@ -9,13 +9,12 @@ import argparse
 import logging
 from pathlib import Path
 from PyQt5.QtCore import Qt, QCoreApplication
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QDialog
 
 # Import data manager
 from data.data_manager import DataManager
 
-# Import GUI (to be implemented)
-# from gui.main_window import MainWindow
+# GUI components are imported inside main() after QApplication is created
 
 
 def parse_arguments():
@@ -94,9 +93,17 @@ def main():
     # Set application style
     app.setStyle('Fusion')
     
-    # Note: MainWindow implementation would go here
-    from gui.main_window import MainWindow
-    main_window = MainWindow(data_manager, logger)
+    # Import GUI components after QApplication is created
+    from gui.main_window import MainWindow, ModeSelectionDialog
+
+    # Prompt user to select mode at startup
+    mode_dialog = ModeSelectionDialog()
+    if mode_dialog.exec_() != QDialog.Accepted:
+        logger.info("Mode selection cancelled. Exiting.")
+        return 0
+    mode = mode_dialog.selected_mode()
+
+    main_window = MainWindow(data_manager, logger, mode=mode)
     main_window.show()
     return app.exec_()
 

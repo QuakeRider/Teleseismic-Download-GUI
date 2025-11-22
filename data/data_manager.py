@@ -213,7 +213,8 @@ class DataManager:
             import csv
             fieldnames = [
                 'network','station','latitude','longitude','elevation',
-                'start_date','end_date','site_name','provider','channel_types'
+                'start_date','end_date','site_name','provider','channel_types',
+                'distance_deg','azimuth','back_azimuth'
             ]
             Path(output_file).parent.mkdir(parents=True, exist_ok=True)
             with open(output_file, 'w', newline='', encoding='utf-8') as f:
@@ -235,7 +236,8 @@ class DataManager:
         try:
             import csv
             fieldnames = [
-                'event_id','time','latitude','longitude','depth','magnitude','magnitude_type','distance_deg','catalog_source'
+                'event_id','time','latitude','longitude','depth','magnitude',
+                'magnitude_type','distance_deg','catalog_source'
             ]
             Path(output_file).parent.mkdir(parents=True, exist_ok=True)
             with open(output_file, 'w', newline='', encoding='utf-8') as f:
@@ -247,6 +249,18 @@ class DataManager:
             return True
         except Exception as e:
             print(f"Failed to export events CSV: {e}")
+            return False
+
+    def export_events_json(self, output_file: str) -> bool:
+        """Export current events list (with full metadata) to a JSON file."""
+        try:
+            Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_file, 'w', encoding='utf-8') as f:
+                # state['events'] should already be JSON-serializable
+                json.dump(self.state['events'], f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Failed to export events JSON: {e}")
             return False
     
     def clear_state(self):

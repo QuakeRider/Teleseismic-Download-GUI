@@ -15,7 +15,8 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QPushButton, QLabel, QLineEdit, QComboBox, QDateTimeEdit, QDoubleSpinBox,
     QSpinBox, QCheckBox, QFileDialog, QProgressBar, QTextEdit, QDockWidget,
-    QTableWidget, QTableWidgetItem, QMessageBox
+    QTableWidget, QTableWidgetItem, QMessageBox, QDialog, QDialogButtonBox,
+    QRadioButton
 )
 
 from data.data_manager import DataManager
@@ -24,6 +25,34 @@ from services.event_service import EventService, MagnitudeDepthFilter
 from services.waveform_downloader import WaveformDownloader
 from utils.logging_progress import ProgressManager, setup_logger
 from gui.map_pane import MapPane
+
+
+class ModeSelectionDialog(QDialog):
+    """Startup dialog to choose between array-based and event-based modes."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Download Mode")
+
+        layout = QVBoxLayout(self)
+        label = QLabel("Select the mode for this session:")
+        layout.addWidget(label)
+
+        self.array_radio = QRadioButton("Array-based mode (ROI / array analysis)")
+        self.event_radio = QRadioButton("Event-based mode (single-event analysis)")
+        self.array_radio.setChecked(True)
+
+        layout.addWidget(self.array_radio)
+        layout.addWidget(self.event_radio)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def selected_mode(self) -> str:
+        """Return the selected mode string ('array' or 'event')."""
+        return 'event' if self.event_radio.isChecked() else 'array'
 
 
 class WorkerThread(QThread):
@@ -45,7 +74,7 @@ class WorkerThread(QThread):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, data_manager: DataManager, base_logger: logging.Logger):
+    def __init__(self, data_manager: DataManager, base_logger: logging.Logger, mode: str = 'array'):
         super().__init__()
         self.setWindowTitle("Seismic Data Downloader")
         self.resize(1280, 900)
@@ -58,6 +87,13 @@ class MainWindow(QMainWindow):
         self.stations: List[Dict] = []
         self.theoretical_arrivals: Dict[str, Dict[str, float]] = {}
         self.center: Optional[Tuple[float, float]] = None
+        self.current_event: Optional[Dict] = None
+        # Event-mode specific state
+        self.ev_mode_roi: Optional[Dict] = None
+        self.ev_mode_events: List[Dict] = []
+        self.ev_mode_selected_index: Optional[int] = None
+        self.ev_mode_confirmed_index: Optional[int] = None
+        self.mode = mode if mode in ("array", "event") else "array"
 
         # Log dock and logger
         self.log_text = QTextEdit()
@@ -82,7 +118,25 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
+        # Project tab is shared between modes
         self.project_tab = self._build_project_tab()
+
+        # Initialize mode-specific tabs
+        if self.mode == 'event':
+            self._init_event_mode_tabs()
+        else:
+            self._init_array_mode_tabs()
+
+        # Connect progress signals
+        self.progress_manager.progress_updated.connect(self._on_progress_updated)
+        self.progress_manager.task_completed.connect(self._on_task_completed)
+        self.progress_manager.task_failed.connect(self._on_task_failed)
+
+        self._workers = []  # Keep references to worker threads
+        self.logger.info(f"GUI initialized in {self.mode} mode.")
+
+    def _init_array_mode_tabs(self):
+        """Initialize tabs for array-based (ROI-centered) workflow."""
         self.station_tab = self._build_station_tab()
         self.event_tab = self._build_event_tab()
         self.download_tab = self._build_download_tab()
@@ -107,13 +161,16 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.event_tab, "Events")
         self.tabs.addTab(self.download_tab, "Download")
 
-        # Connect progress signals
-        self.progress_manager.progress_updated.connect(self._on_progress_updated)
-        self.progress_manager.task_completed.connect(self._on_task_completed)
-        self.progress_manager.task_failed.connect(self._on_task_failed)
+    def _init_event_mode_tabs(self):
+        """Initialize tabs for single-event based workflow."""
+        self.event_mode_event_tab = self._build_event_mode_event_tab()
+        self.event_mode_station_tab = self._build_event_mode_station_tab()
+        self.download_tab = self._build_download_tab()
 
-        self._workers = []  # Keep references to worker threads
-        self.logger.info("GUI initialized.")
+        self.tabs.addTab(self.project_tab, "Project")
+        self.tabs.addTab(self.event_mode_event_tab, "Event")
+        self.tabs.addTab(self.event_mode_station_tab, "Stations")
+        self.tabs.addTab(self.download_tab, "Download")
 
     # ------------------------
     # Project Tab
@@ -190,6 +247,571 @@ class MainWindow(QMainWindow):
         self.btn_init_project.clicked.connect(_init_project)
 
         return w
+
+    # ------------------------
+    # Event-based Mode Tabs
+    # ------------------------
+    def _build_event_mode_event_tab(self) -> QWidget:
+        """Event tab for single-event based workflow.
+
+        User draws a region on the map, sets time and magnitude ranges,
+        then selects and confirms a specific event for analysis.
+        """
+        w = QWidget()
+        outer = QHBoxLayout(w)
+
+        # Left controls
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        form = QFormLayout()
+
+        self.ev_mode_catalog_combo = QComboBox()
+        self.ev_mode_catalog_combo.addItems(["IRIS", "USGS", "ISC"])
+
+        # Time range
+        self.ev_mode_start_dt = QDateTimeEdit()
+        self.ev_mode_start_dt.setCalendarPopup(True)
+        self.ev_mode_start_dt.setDateTime(QDateTime.currentDateTime().addDays(-30))
+        self.ev_mode_end_dt = QDateTimeEdit()
+        self.ev_mode_end_dt.setCalendarPopup(True)
+        self.ev_mode_end_dt.setDateTime(QDateTime.currentDateTime())
+
+        # Magnitude range
+        self.ev_mode_min_mag = QDoubleSpinBox(); self.ev_mode_min_mag.setRange(0.0, 10.0); self.ev_mode_min_mag.setSingleStep(0.1); self.ev_mode_min_mag.setValue(5.0)
+        self.ev_mode_max_mag = QDoubleSpinBox(); self.ev_mode_max_mag.setRange(0.0, 10.0); self.ev_mode_max_mag.setSingleStep(0.1); self.ev_mode_max_mag.setValue(9.5)
+
+        form.addRow("Catalog:", self.ev_mode_catalog_combo)
+        form.addRow("Start Time:", self.ev_mode_start_dt)
+        form.addRow("End Time:", self.ev_mode_end_dt)
+        form.addRow("Magnitude (min/max):", self._row(self.ev_mode_min_mag, self.ev_mode_max_mag))
+
+        # Buttons for search, confirm, save
+        btn_row = QHBoxLayout()
+        self.btn_ev_mode_search_events = QPushButton("Search Events")
+        self.btn_ev_mode_confirm_event = QPushButton("Confirm Event")
+        self.btn_ev_mode_save_events = QPushButton("Save Event")
+        self.btn_ev_mode_confirm_event.setEnabled(False)
+        self.btn_ev_mode_save_events.setEnabled(False)
+        btn_row.addWidget(self.btn_ev_mode_search_events)
+        btn_row.addWidget(self.btn_ev_mode_confirm_event)
+        btn_row.addWidget(self.btn_ev_mode_save_events)
+        form.addRow(self._wrap(btn_row))
+
+        left_layout.addLayout(form)
+
+        # Right: map + table
+        right_widget = QWidget(); right_inner = QVBoxLayout(right_widget)
+        # Enable drawing controls so user can draw a box for event region
+        self.ev_mode_events_map = MapPane(add_draw_controls=True)
+        self.ev_mode_events_map.roi_changed.connect(self._on_ev_mode_roi_changed)
+        right_inner.addWidget(self.ev_mode_events_map, stretch=3)
+
+        # First column is a checkbox ("Use")
+        self.ev_mode_event_table = QTableWidget(0, 8)
+        self.ev_mode_event_table.setHorizontalHeaderLabels([
+            "Use", "ID", "Time", "Lat", "Lon", "Depth", "Mag", "Catalog"
+        ])
+        right_inner.addWidget(self.ev_mode_event_table, stretch=2)
+
+        # Selected / confirmed event summary
+        self.ev_mode_selected_event_label = QLabel("No event selected.")
+        right_inner.addWidget(self.ev_mode_selected_event_label)
+
+        outer.addWidget(left, stretch=1)
+        outer.addWidget(right_widget, stretch=3)
+
+        # Connections
+        self.btn_ev_mode_search_events.clicked.connect(self._on_ev_mode_search_events)
+        self.btn_ev_mode_confirm_event.clicked.connect(self._on_ev_mode_confirm_event)
+        self.btn_ev_mode_save_events.clicked.connect(self._on_ev_mode_save_events)
+        self.ev_mode_event_table.cellClicked.connect(self._on_ev_mode_event_cell_clicked)
+        self.ev_mode_event_table.itemChanged.connect(self._on_ev_mode_event_item_changed)
+
+        return w
+
+    def _build_event_mode_station_tab(self) -> QWidget:
+        """Station tab for single-event workflow.
+
+        Searches for stations by epicentral distance from the selected event.
+        """
+        w = QWidget()
+        outer = QHBoxLayout(w)
+
+        # Left controls
+        left = QWidget(); left_layout = QVBoxLayout(left)
+        form = QFormLayout()
+
+        # Providers
+        providers_layout = QHBoxLayout()
+        self.ev_mode_provider_checks = []
+        for name in ["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETHZ", "NCEDC", "SCEDC", "USGS"]:
+            cb = QCheckBox(name)
+            if name == "IRIS":
+                cb.setChecked(True)
+            self.ev_mode_provider_checks.append(cb)
+            providers_layout.addWidget(cb)
+        form.addRow(QLabel("Providers:"), self._wrap(providers_layout))
+
+        # Network/station filters
+        self.ev_mode_network_input = QLineEdit("*")
+        self.ev_mode_station_input = QLineEdit("*")
+        form.addRow("Networks:", self.ev_mode_network_input)
+        form.addRow("Stations:", self.ev_mode_station_input)
+
+        # Sensor families (BH, HH, EH, LH, SH, VH, UH) -> channel patterns like BH?,HH?
+        fam_row = QHBoxLayout()
+        self.ev_mode_channel_families = {}
+        for fam in ["BH", "HH", "EH", "LH", "SH", "VH", "UH"]:
+            cb = QCheckBox(fam)
+            if fam in ("BH", "HH"):
+                cb.setChecked(True)
+            self.ev_mode_channel_families[fam] = cb
+            fam_row.addWidget(cb)
+        form.addRow("Sensor families:", self._wrap(fam_row))
+        self.ev_mode_channels_input = QLineEdit("")
+        form.addRow("Channel pattern(s):", self.ev_mode_channels_input)
+
+        # Distance range relative to event
+        self.ev_mode_min_dist = QDoubleSpinBox(); self.ev_mode_min_dist.setRange(0.0, 180.0); self.ev_mode_min_dist.setValue(30.0)
+        self.ev_mode_max_dist = QDoubleSpinBox(); self.ev_mode_max_dist.setRange(0.0, 180.0); self.ev_mode_max_dist.setValue(90.0)
+        form.addRow("Distance° (min/max):", self._row(self.ev_mode_min_dist, self.ev_mode_max_dist))
+
+        # Time window around event (for station availability)
+        self.ev_mode_sta_start_dt = QDateTimeEdit(); self.ev_mode_sta_start_dt.setCalendarPopup(True)
+        self.ev_mode_sta_end_dt = QDateTimeEdit(); self.ev_mode_sta_end_dt.setCalendarPopup(True)
+        now = QDateTime.currentDateTime()
+        # Defaults; will be updated to surround confirmed event time when available
+        self.ev_mode_sta_start_dt.setDateTime(now.addDays(-1))
+        self.ev_mode_sta_end_dt.setDateTime(now.addDays(1))
+        form.addRow("Start Time:", self.ev_mode_sta_start_dt)
+        form.addRow("End Time:", self.ev_mode_sta_end_dt)
+
+        controls_row = QHBoxLayout()
+        self.btn_ev_mode_search_stations = QPushButton("Search Stations")
+        self.btn_ev_mode_save_stations = QPushButton("Save Stations")
+        self.btn_ev_mode_save_stations.setEnabled(False)
+        controls_row.addWidget(self.btn_ev_mode_search_stations)
+        controls_row.addWidget(self.btn_ev_mode_save_stations)
+        form.addRow(self._wrap(controls_row))
+
+        left_layout.addLayout(form)
+
+        # Right: map + table
+        right_widget = QWidget(); right_inner = QVBoxLayout(right_widget)
+        # Map without drawing controls (event geometry comes from Event tab)
+        self.ev_mode_station_map = MapPane(add_draw_controls=False)
+        right_inner.addWidget(self.ev_mode_station_map, stretch=3)
+        self.ev_mode_station_table = QTableWidget(0, 9)
+        self.ev_mode_station_table.setHorizontalHeaderLabels([
+            "Network", "Station", "Lat", "Lon", "Provider", "Channels", "Dist°", "Az", "Baz"
+        ])
+        right_inner.addWidget(self.ev_mode_station_table, stretch=2)
+
+        outer.addWidget(left, stretch=1)
+        outer.addWidget(right_widget, stretch=3)
+
+        # Initialize channel patterns from families
+        self._update_ev_mode_channels_from_families()
+        for cb in self.ev_mode_channel_families.values():
+            cb.stateChanged.connect(self._update_ev_mode_channels_from_families)
+
+        # Connections
+        self.btn_ev_mode_search_stations.clicked.connect(self._on_ev_mode_search_stations)
+        self.btn_ev_mode_save_stations.clicked.connect(self._on_ev_mode_save_stations)
+
+        return w
+
+    def _update_ev_mode_channels_from_families(self):
+        """Update channel pattern line edit from selected sensor families."""
+        fams = [k for k, cb in self.ev_mode_channel_families.items() if cb.isChecked()]
+        patterns = [f"{fam}?" for fam in fams]
+        self.ev_mode_channels_input.setText(",".join(patterns) if patterns else "")
+
+    def _on_ev_mode_roi_changed(self, roi_obj):
+        """Store ROI for event-mode search when user draws/edits a shape."""
+        self.ev_mode_roi = roi_obj
+        self.logger.info("Event-mode ROI updated.")
+
+    def _on_ev_mode_search_events(self):
+        """Search for events using the event-mode controls and ROI box."""
+        catalog = self.ev_mode_catalog_combo.currentText()
+
+        # Require ROI defining the geographic search region
+        roi = self.ev_mode_roi or self.ev_mode_events_map.get_current_roi()
+        if not roi:
+            QMessageBox.warning(self, "ROI Required", "Please draw a rectangle or circle on the map to define the event region.")
+            return
+
+        bbox = MapPane.extract_bbox_from_roi(roi)
+        if not bbox:
+            QMessageBox.warning(self, "Invalid ROI", "Could not extract bounding box from the ROI.")
+            return
+        min_lon, min_lat, max_lon, max_lat = bbox
+
+        # Compute center from ROI for use in distance-based search
+        center = MapPane.compute_center_from_roi(roi)
+        if not center:
+            QMessageBox.warning(self, "Invalid ROI", "Could not compute center from the ROI.")
+            return
+        center_lat, center_lon = center
+
+        # Time and magnitude ranges
+        start = self.ev_mode_start_dt.dateTime().toString(Qt.ISODate)
+        end = self.ev_mode_end_dt.dateTime().toString(Qt.ISODate)
+        min_mag = float(self.ev_mode_min_mag.value())
+        max_mag = float(self.ev_mode_max_mag.value())
+
+        self.btn_ev_mode_search_events.setEnabled(False)
+        self.ev_mode_selected_index = None
+        self.ev_mode_confirmed_index = None
+        self.current_event = None
+        self.btn_ev_mode_confirm_event.setEnabled(False)
+        self.btn_ev_mode_save_events.setEnabled(False)
+
+        def on_finished(result):
+            self.btn_ev_mode_search_events.setEnabled(True)
+            if result is None:
+                QMessageBox.critical(self, "Error", "Event search failed.")
+                return
+
+            # Filter by ROI bbox and magnitude range
+            events = [
+                e for e in result
+                if min_lat <= e.get('latitude', 0.0) <= max_lat
+                and min_lon <= e.get('longitude', 0.0) <= max_lon
+                and min_mag <= e.get('magnitude', 0.0) <= max_mag
+            ]
+
+            self.ev_mode_events = events
+            self.events = events[:]  # Make available to download tab if needed
+            self._populate_ev_mode_event_table(events)
+            self.ev_mode_selected_event_label.setText("No event selected.")
+
+            # Draw ROI and events with no highlights yet
+            self._refresh_ev_mode_event_map_highlights()
+
+            self.btn_ev_mode_confirm_event.setEnabled(len(events) > 0)
+            self.logger.info(f"Event-mode search complete: {len(events)} candidate events.")
+
+        def on_error(msg):
+            self.btn_ev_mode_search_events.setEnabled(True)
+            QMessageBox.critical(self, "Error", f"Event search failed: {msg}")
+
+        worker = WorkerThread(
+            self.event_service.search_events,
+            catalog_source=catalog,
+            center=center,
+            start_time=start,
+            end_time=end,
+            min_magnitude=min_mag,
+            max_magnitude=max_mag,
+            min_depth=0.0,
+            max_depth=700.0,
+            min_distance=0.0,
+            max_distance=180.0,
+        )
+        self._run_worker(worker, on_finished, on_error)
+
+    def _populate_ev_mode_event_table(self, events: List[Dict]):
+        self.ev_mode_event_table.blockSignals(True)
+        self.ev_mode_event_table.setRowCount(0)
+        for e in events:
+            row = self.ev_mode_event_table.rowCount()
+            self.ev_mode_event_table.insertRow(row)
+            # Checkbox column
+            use_item = QTableWidgetItem()
+            use_item.setFlags(use_item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            use_item.setCheckState(Qt.Unchecked)
+            self.ev_mode_event_table.setItem(row, 0, use_item)
+            # Data columns
+            self.ev_mode_event_table.setItem(row, 1, QTableWidgetItem(e.get('event_id', '')))
+            self.ev_mode_event_table.setItem(row, 2, QTableWidgetItem(e.get('time', '')))
+            self.ev_mode_event_table.setItem(row, 3, QTableWidgetItem(f"{e.get('latitude', 0):.3f}"))
+            self.ev_mode_event_table.setItem(row, 4, QTableWidgetItem(f"{e.get('longitude', 0):.3f}"))
+            self.ev_mode_event_table.setItem(row, 5, QTableWidgetItem(f"{e.get('depth', 0):.1f}"))
+            self.ev_mode_event_table.setItem(row, 6, QTableWidgetItem(f"{e.get('magnitude', 0):.1f}"))
+            self.ev_mode_event_table.setItem(row, 7, QTableWidgetItem(e.get('catalog_source', '')))
+        self.ev_mode_event_table.blockSignals(False)
+        self.ev_mode_event_table.resizeColumnsToContents()
+
+    def _on_ev_mode_event_cell_clicked(self, row: int, column: int):
+        """Handle clicks on event table rows (selection vs checkbox)."""
+        if row < 0 or row >= len(self.ev_mode_events):
+            return
+        # Column 0 is the checkbox; any column click selects the row as the current candidate
+        self.ev_mode_selected_index = row
+        # Make candidate visible on map (yellow ring)
+        self._refresh_ev_mode_event_map_highlights()
+
+    def _on_ev_mode_event_item_changed(self, item: QTableWidgetItem):
+        """Enforce single checked event and track confirmed event index."""
+        if item.column() != 0:
+            return
+        row = item.row()
+        if item.checkState() == Qt.Checked:
+            # Uncheck all other rows
+            self.ev_mode_event_table.blockSignals(True)
+            rows = self.ev_mode_event_table.rowCount()
+            for r in range(rows):
+                if r == row:
+                    continue
+                other = self.ev_mode_event_table.item(r, 0)
+                if other is not None and other.checkState() == Qt.Checked:
+                    other.setCheckState(Qt.Unchecked)
+            self.ev_mode_event_table.blockSignals(False)
+            # Update confirmed index and current_event
+            self.ev_mode_confirmed_index = row
+            if 0 <= row < len(self.ev_mode_events):
+                ev = self.ev_mode_events[row]
+                self.current_event = ev
+                self.events = [ev]
+                # Enable confirm/save buttons
+                self.btn_ev_mode_confirm_event.setEnabled(True)
+                self.btn_ev_mode_save_events.setEnabled(True)
+            self._refresh_ev_mode_event_map_highlights()
+        else:
+            # Checkbox unchecked for this row
+            if self.ev_mode_confirmed_index == row:
+                self.ev_mode_confirmed_index = None
+                self.current_event = None
+                self.events = []
+                self.btn_ev_mode_save_events.setEnabled(False)
+            self._refresh_ev_mode_event_map_highlights()
+
+    def _refresh_ev_mode_event_map_highlights(self):
+        """Redraw ROI and events, highlighting selected and confirmed with rings.
+
+        - All events: red markers with black outline (via MapPane.add_events).
+        - Selected (but not confirmed): yellow ring.
+        - Confirmed (checkbox): blue ring.
+        """
+        try:
+            # Clear all layers and redraw ROI if present
+            self.ev_mode_events_map.clear_markers()
+            roi = self.ev_mode_roi
+            if roi:
+                bbox = MapPane.extract_bbox_from_roi(roi)
+                if bbox:
+                    min_lon, min_lat, max_lon, max_lat = bbox
+                    # Redraw ROI rectangle
+                    self.ev_mode_events_map.draw_rectangle(min_lat, min_lon, max_lat, max_lon)
+            # Plot events
+            if self.ev_mode_events:
+                self.ev_mode_events_map.add_events(self.ev_mode_events)
+            # Add highlight rings
+            def _add_ring_for_index(idx: Optional[int], color: str):
+                if idx is None or idx < 0 or idx >= len(self.ev_mode_events):
+                    return
+                ev = self.ev_mode_events[idx]
+                lat = ev.get('latitude', 0.0)
+                lon = ev.get('longitude', 0.0)
+                radius_m = 300000.0  # ~3 degrees, just for visual highlighting
+                js = f"addRing({lat}, {lon}, {radius_m}, '{color}', '5,5', null);"
+                self.ev_mode_events_map.web_view.page().runJavaScript(js)
+            # Selected (yellow) and confirmed (blue)
+            _add_ring_for_index(self.ev_mode_selected_index, '#ffff00')
+            _add_ring_for_index(self.ev_mode_confirmed_index, '#0000ff')
+        except Exception:
+            pass
+
+    def _on_ev_mode_confirm_event(self):
+        """Confirm currently checked event and propagate its info to Stations tab."""
+        if self.ev_mode_confirmed_index is None or not self.current_event:
+            QMessageBox.warning(self, "No Event Selected", "Please check one event in the table before confirming.")
+            return
+
+        ev = self.current_event
+        # Update summary label
+        summary = (
+            f"Confirmed event: {ev.get('event_id', '')} | "
+            f"M{ev.get('magnitude', 0):.1f} | "
+            f"{ev.get('time', '')} | "
+            f"({ev.get('latitude', 0):.3f}, {ev.get('longitude', 0):.3f})"
+        )
+        self.ev_mode_selected_event_label.setText(summary)
+
+        # Update station time window based on event time
+        self._update_ev_mode_station_time_from_event()
+
+        # Re-highlight map with confirmed event (blue ring)
+        self._refresh_ev_mode_event_map_highlights()
+
+    def _update_ev_mode_station_time_from_event(self):
+        """Set station time window around the confirmed event time (±1 day by default)."""
+        if not self.current_event:
+            return
+        try:
+            ev_time_str = self.current_event.get('time', '')
+            if not ev_time_str:
+                return
+            ev_dt = QDateTime.fromString(ev_time_str, Qt.ISODate)
+            if not ev_dt.isValid():
+                return
+            start_dt = ev_dt.addDays(-1)
+            end_dt = ev_dt.addDays(1)
+            self.ev_mode_sta_start_dt.setDateTime(start_dt)
+            self.ev_mode_sta_end_dt.setDateTime(end_dt)
+        except Exception:
+            pass
+
+    def _on_ev_mode_save_events(self):
+        """Save selected event(s) to project (CSV + JSON)."""
+        if not self.events:
+            QMessageBox.warning(self, "No Events", "No events to save. Perform a search and select an event.")
+            return
+
+        self.data_manager.set_events(self.events)
+        self.data_manager.save_checkpoint("events")
+
+        # Export CSV and JSON if project_dir is set
+        try:
+            proj = self.data_manager.project_dir
+            if proj:
+                events_dir = proj / 'data' / 'events'
+                events_csv = events_dir / 'events.csv'
+                events_json = events_dir / 'events.json'
+                self.data_manager.export_events_csv(str(events_csv))
+                self.data_manager.export_events_json(str(events_json))
+                self.logger.info("Saved events CSV and JSON.")
+        except Exception as e:
+            self.logger.warning(f"Could not export events CSV/JSON: {e}")
+
+        QMessageBox.information(self, "Saved", f"Saved {len(self.events)} event(s) to project.")
+
+    def _on_ev_mode_search_stations(self):
+        """Search for stations by epicentral distance from the selected event."""
+        if not self.current_event:
+            QMessageBox.warning(self, "Event Required", "Please select an event on the Event tab first (double-click a row).")
+            return
+
+        providers = [cb.text() for cb in self.ev_mode_provider_checks if cb.isChecked()]
+        if not providers:
+            QMessageBox.warning(self, "No Providers", "Please select at least one provider.")
+            return
+
+        event_lat = float(self.current_event.get('latitude', 0.0))
+        event_lon = float(self.current_event.get('longitude', 0.0))
+        min_dist = float(self.ev_mode_min_dist.value())
+        max_dist = float(self.ev_mode_max_dist.value())
+
+        start_time = self.ev_mode_sta_start_dt.dateTime().toString(Qt.ISODate)
+        end_time = self.ev_mode_sta_end_dt.dateTime().toString(Qt.ISODate)
+        channels = self.ev_mode_channels_input.text().strip() or "BH?"
+
+        self.btn_ev_mode_search_stations.setEnabled(False)
+
+        def on_finished(result):
+            self.btn_ev_mode_search_stations.setEnabled(True)
+            if result is None:
+                QMessageBox.critical(self, "Error", "Station search failed.")
+                return
+
+            self.stations = result
+            self._populate_ev_mode_station_table(result)
+
+            # Plot event, rings, and stations on the map
+            try:
+                self.ev_mode_station_map.clear_markers()
+                self.ev_mode_station_map.set_center_and_rings((event_lat, event_lon), [min_dist, max_dist])
+                self.ev_mode_station_map.add_events([self.current_event])
+                self.ev_mode_station_map.add_stations(result)
+            except Exception:
+                pass
+
+            self.btn_ev_mode_save_stations.setEnabled(True)
+            self.logger.info(f"Event-mode station search complete: {len(result)} stations.")
+
+        def on_error(msg):
+            self.btn_ev_mode_search_stations.setEnabled(True)
+            QMessageBox.critical(self, "Error", f"Station search failed: {msg}")
+
+        worker = WorkerThread(
+            self.station_service.search_stations_by_event_distance,
+            providers=providers,
+            event_lat=event_lat,
+            event_lon=event_lon,
+            min_distance_deg=min_dist,
+            max_distance_deg=max_dist,
+            networks=self.ev_mode_network_input.text().strip() or "*",
+            stations=self.ev_mode_station_input.text().strip() or "*",
+            channels=channels,
+            start_time=start_time,
+            end_time=end_time,
+            include_closed=False,
+        )
+        self._run_worker(worker, on_finished, on_error)
+
+    def _populate_ev_mode_station_table(self, stations: List[Dict]):
+        self.ev_mode_station_table.setRowCount(0)
+        for s in stations:
+            row = self.ev_mode_station_table.rowCount()
+            self.ev_mode_station_table.insertRow(row)
+            self.ev_mode_station_table.setItem(row, 0, QTableWidgetItem(s.get('network', '')))
+            self.ev_mode_station_table.setItem(row, 1, QTableWidgetItem(s.get('station', '')))
+            self.ev_mode_station_table.setItem(row, 2, QTableWidgetItem(f"{s.get('latitude', 0):.3f}"))
+            self.ev_mode_station_table.setItem(row, 3, QTableWidgetItem(f"{s.get('longitude', 0):.3f}"))
+            self.ev_mode_station_table.setItem(row, 4, QTableWidgetItem(s.get('provider', '')))
+            chan_types = s.get('channel_types') or []
+            chan_list = s.get('channels') or []
+            chan_display = ",".join(chan_types) if chan_types else ",".join(chan_list)
+            self.ev_mode_station_table.setItem(row, 5, QTableWidgetItem(chan_display))
+            self.ev_mode_station_table.setItem(row, 6, QTableWidgetItem(f"{s.get('distance_deg', 0):.2f}"))
+            self.ev_mode_station_table.setItem(row, 7, QTableWidgetItem(f"{s.get('azimuth', 0):.1f}"))
+            self.ev_mode_station_table.setItem(row, 8, QTableWidgetItem(f"{s.get('back_azimuth', 0):.1f}"))
+        self.ev_mode_station_table.resizeColumnsToContents()
+
+    def _on_ev_mode_save_stations(self):
+        """Save event-mode stations to project (CSV + StationXML)."""
+        if not self.stations:
+            QMessageBox.warning(self, "No Stations", "No stations to save. Perform a station search first.")
+            return
+
+        self.data_manager.set_stations(self.stations)
+        self.data_manager.save_checkpoint("stations")
+
+        # Export CSV and StationXML if project_dir is set
+        try:
+            proj = self.data_manager.project_dir
+            if not proj:
+                QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (checkpoint only).")
+                return
+
+            stations_csv = proj / 'data' / 'stations' / 'stations.csv'
+            self.data_manager.export_stations_csv(str(stations_csv))
+            sx_dir = proj / 'data' / 'stationxml'
+
+            # Save StationXML in a background worker, constrained to event-mode time window and channels
+            start_time = self.ev_mode_sta_start_dt.dateTime().toString(Qt.ISODate)
+            end_time = self.ev_mode_sta_end_dt.dateTime().toString(Qt.ISODate)
+            channels = self.ev_mode_channels_input.text().strip() or "BH?"
+
+            self.btn_ev_mode_save_stations.setEnabled(False)
+
+            def on_finished(count):
+                self.btn_ev_mode_save_stations.setEnabled(True)
+                n = int(count) if isinstance(count, int) else 0
+                self.logger.info(f"Saved stations CSV and {n} StationXML files.")
+                QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (CSV + {n} StationXML files).")
+
+            def on_error(msg):
+                self.btn_ev_mode_save_stations.setEnabled(True)
+                self.logger.warning(f"Could not export StationXML: {msg}")
+                QMessageBox.warning(self, "StationXML", f"StationXML export failed: {msg}")
+
+            worker = WorkerThread(
+                self.station_service.save_stationxml,
+                self.stations,
+                str(sx_dir),
+                'response',
+                120,
+                start_time=start_time,
+                end_time=end_time,
+                channels=channels,
+            )
+            self._run_worker(worker, on_finished, on_error)
+        except Exception as e:
+            self.logger.warning(f"Could not export stations CSV/StationXML: {e}")
+            QMessageBox.warning(self, "Save", f"Stations saved, but StationXML export failed: {e}")
 
     # ------------------------
     # Station Tab
@@ -354,16 +976,45 @@ class MainWindow(QMainWindow):
         # Export CSV and StationXML if project_dir is set
         try:
             proj = self.data_manager.project_dir
-            if proj:
-                stations_csv = proj / 'data' / 'stations' / 'stations.csv'
-                self.data_manager.export_stations_csv(str(stations_csv))
-                # Save StationXML files
-                sx_dir = proj / 'data' / 'stationxml'
-                count = self.station_service.save_stationxml(self.stations, str(sx_dir))
-                self.logger.info(f"Saved stations CSV and {count} StationXML files.")
+            if not proj:
+                QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (checkpoint only).")
+                return
+
+            stations_csv = proj / 'data' / 'stations' / 'stations.csv'
+            self.data_manager.export_stations_csv(str(stations_csv))
+            # Save StationXML files in the background, constrained to station-tab time window and channels
+            sx_dir = proj / 'data' / 'stationxml'
+            start_time = self.sta_start_dt.dateTime().toString(Qt.ISODate)
+            end_time = self.sta_end_dt.dateTime().toString(Qt.ISODate)
+            channels = self.channels_input.text().strip() or "BH?"
+
+            self.btn_save_stations.setEnabled(False)
+
+            def on_finished(count):
+                self.btn_save_stations.setEnabled(True)
+                n = int(count) if isinstance(count, int) else 0
+                self.logger.info(f"Saved stations CSV and {n} StationXML files.")
+                QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (CSV + {n} StationXML files).")
+
+            def on_error(msg):
+                self.btn_save_stations.setEnabled(True)
+                self.logger.warning(f"Could not export StationXML: {msg}")
+                QMessageBox.warning(self, "StationXML", f"StationXML export failed: {msg}")
+
+            worker = WorkerThread(
+                self.station_service.save_stationxml,
+                self.stations,
+                str(sx_dir),
+                'response',
+                120,
+                start_time=start_time,
+                end_time=end_time,
+                channels=channels,
+            )
+            self._run_worker(worker, on_finished, on_error)
         except Exception as e:
             self.logger.warning(f"Could not export stations CSV/StationXML: {e}")
-        QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (CSV + StationXML).")
+            QMessageBox.warning(self, "Save", f"Stations saved, but StationXML export failed: {e}")
 
     # ------------------------
     # Event Tab
@@ -519,16 +1170,19 @@ class MainWindow(QMainWindow):
     def _on_save_events(self):
         self.data_manager.set_events(self.events)
         self.data_manager.save_checkpoint("events")
-        # Export CSV if project_dir is set
+        # Export CSV and JSON if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if proj:
-                events_csv = proj / 'data' / 'events' / 'events.csv'
+                events_dir = proj / 'data' / 'events'
+                events_csv = events_dir / 'events.csv'
+                events_json = events_dir / 'events.json'
                 self.data_manager.export_events_csv(str(events_csv))
-                self.logger.info("Saved events CSV.")
+                self.data_manager.export_events_json(str(events_json))
+                self.logger.info("Saved events CSV and JSON.")
         except Exception as e:
-            self.logger.warning(f"Could not export events CSV: {e}")
-        QMessageBox.information(self, "Saved", f"Saved {len(self.events)} events to project (CSV).")
+            self.logger.warning(f"Could not export events CSV/JSON: {e}")
+        QMessageBox.information(self, "Saved", f"Saved {len(self.events)} events to project (CSV + JSON).")
 
     # ------------------------
     # Download Tab

@@ -7,6 +7,7 @@ deduplicating results, and returning normalized station records.
 
 import time
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
@@ -64,6 +65,31 @@ class StationService:
         self.max_workers = max_workers
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
     
+    def _bbox_from_center_and_distance(
+        self,
+        lat: float,
+        lon: float,
+        max_distance_deg: float
+    ) -> Tuple[float, float, float, float]:
+        """Approximate bounding box that encloses a circle of given angular radius.
+
+        Returns (min_lon, min_lat, max_lon, max_lat).
+        """
+        # Latitude bounds are straightforward in degrees
+        lat_min = max(-90.0, lat - max_distance_deg)
+        lat_max = min(90.0, lat + max_distance_deg)
+
+        # Approximate longitudinal span accounting for latitude
+        if abs(lat) >= 89.0:
+            lon_span = 180.0
+        else:
+            coslat = max(math.cos(math.radians(lat)), 0.1)
+            lon_span = min(max_distance_deg / coslat, 180.0)
+
+        lon_min = max(-180.0, lon - lon_span)
+        lon_max = min(180.0, lon + lon_span)
+        return (lon_min, lat_min, lon_max, lat_max)
+
     def search_stations(
         self,
         providers: List[str],
@@ -136,6 +162,76 @@ class StationService:
         self.logger.info(f"Total: {len(deduplicated)} unique stations after deduplication")
         
         return deduplicated
+
+    def search_stations_by_event_distance(
+        self,
+        providers: List[str],
+        event_lat: float,
+        event_lon: float,
+        min_distance_deg: float,
+        max_distance_deg: float,
+        networks: str = "*",
+        stations: str = "*",
+        channels: str = "BH?",
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        include_closed: bool = False
+    ) -> List[dict]:
+        """Search for stations and filter by epicentral distance from an event.
+
+        This reuses the existing ROI-based search to get candidates, then
+        computes event–station distances and azimuths to filter to the
+        requested [min_distance_deg, max_distance_deg] range.
+        """
+        # Build ROI bounding box that covers the maximum distance
+        roi_bbox = self._bbox_from_center_and_distance(event_lat, event_lon, max_distance_deg)
+
+        # Use existing search machinery (with concurrency and progress tracking)
+        all_stations = self.search_stations(
+            providers=providers,
+            roi_bbox=roi_bbox,
+            networks=networks,
+            stations=stations,
+            channels=channels,
+            start_time=start_time,
+            end_time=end_time,
+            include_closed=include_closed,
+        )
+        if not all_stations:
+            return []
+
+        try:
+            from obspy.geodetics import gps2dist_azimuth, locations2degrees
+        except Exception:
+            self.logger.error("ObsPy geodetics is required for distance filtering in search_stations_by_event_distance.")
+            return all_stations
+
+        filtered: List[dict] = []
+        for sta in all_stations:
+            try:
+                dist_deg = locations2degrees(
+                    event_lat, event_lon,
+                    sta['latitude'], sta['longitude']
+                )
+                if not (min_distance_deg <= dist_deg <= max_distance_deg):
+                    continue
+
+                distance_m, az, baz = gps2dist_azimuth(
+                    event_lat, event_lon,
+                    sta['latitude'], sta['longitude']
+                )
+
+                sta_with_meta = dict(sta)
+                sta_with_meta['distance_deg'] = round(dist_deg, 2)
+                sta_with_meta['azimuth'] = round(az, 1)
+                sta_with_meta['back_azimuth'] = round(baz, 1)
+                filtered.append(sta_with_meta)
+            except Exception as exc:
+                self.logger.debug(
+                    f"Could not compute distance/azimuth for station {sta.get('network','')}.{sta.get('station','')}: {exc}"
+                )
+
+        return filtered
     
     def _query_provider(
         self,
@@ -377,17 +473,32 @@ class StationService:
         stations: List[dict],
         output_dir: str,
         level: str = 'response',
-        timeout: int = 120
+        timeout: int = 120,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        channels: Optional[str] = None
     ) -> int:
-        """
-        Fetch and save StationXML files (Inventory) for given stations.
-        Saved as <NET>.<STA>.xml under output_dir.
+        """Fetch and save StationXML files (Inventory) for given stations.
+
+        Only metadata near the requested time window and for the requested
+        channels (sensor families) is requested when possible. Files are
+        saved as <NET>.<STA>.xml under ``output_dir``.
 
         Returns number of files saved.
         """
         from pathlib import Path
-        saved = 0
+
         Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        # Track progress
+        task_id = "stationxml_save"
+        total = len({f"{s['network']}.{s['station']}" for s in stations}) if stations else 0
+        if total <= 0:
+            return 0
+        self.progress_manager.create_task(task_id, total, "Saving StationXML metadata")
+
+        saved = 0
+        processed = 0
         seen = set()
         for s in stations:
             key = f"{s['network']}.{s['station']}"
@@ -398,10 +509,28 @@ class StationService:
                 provider = s.get('provider', 'IRIS')
                 client_name = self.PROVIDER_ENDPOINTS.get(provider, 'IRIS')
                 client = Client(client_name, timeout=timeout)
-                inv = client.get_stations(network=s['network'], station=s['station'], level=level)
+
+                params = {
+                    'network': s['network'],
+                    'station': s['station'],
+                    'level': level,
+                }
+                if channels:
+                    params['channel'] = channels
+                if start_time:
+                    params['starttime'] = UTCDateTime(start_time)
+                if end_time:
+                    params['endtime'] = UTCDateTime(end_time)
+
+                inv = client.get_stations(**params)
                 out_path = Path(output_dir) / f"{key}.xml"
                 inv.write(str(out_path), format='STATIONXML')
                 saved += 1
             except Exception as e:
                 self.logger.warning(f"StationXML fetch failed for {key}: {e}")
+            finally:
+                processed += 1
+                self.progress_manager.update_task(task_id, processed)
+
+        self.progress_manager.complete_task(task_id, success=True)
         return saved

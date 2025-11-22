@@ -36,6 +36,20 @@ class WaveformDownloader:
     features including bulk download, retry logic, progress tracking,
     gap detection, and data validation.
     """
+
+    # Map station 'provider' keys to FDSN client names
+    FDSN_PROVIDER_ENDPOINTS = {
+        "IRIS": "IRIS",
+        "GEOFON": "GFZ",
+        "ORFEUS": "ORFEUS",
+        "RESIF": "RESIF",
+        "INGV": "INGV",
+        "ETHZ": "ETH",   # station metadata uses ETHZ, FDSN client uses ETH
+        "ETH": "ETH",
+        "NCEDC": "NCEDC",
+        "SCEDC": "SCEDC",
+        "USGS": "USGS",
+    }
     
     def __init__(self, progress_manager: ProgressManager, logger: logging.Logger):
         """
@@ -181,13 +195,24 @@ class WaveformDownloader:
             # Parse channel codes
             channel_list = [ch.strip() for ch in channels.split(',')]
             
-            # Initialize FDSN client
+            # Initialize FDSN client kwargs (reused across providers)
             client_kwargs = {}
             if username:
                 client_kwargs['user'] = username
             if password:
                 client_kwargs['password'] = password
-            client = Client(provider, **client_kwargs)
+
+            # Helper to get or create a client per provider key
+            client_cache: Dict[str, Client] = {}
+
+            def get_client_for_provider(provider_key: Optional[str]) -> Client:
+                """Resolve provider key from stations or UI into an ObsPy Client instance."""
+                key = provider_key or provider
+                # Map station provider (e.g. ETHZ) to FDSN endpoint
+                client_name = self.FDSN_PROVIDER_ENDPOINTS.get(key, provider)
+                if client_name not in client_cache:
+                    client_cache[client_name] = Client(client_name, **client_kwargs)
+                return client_cache[client_name]
             
             # Initialize stream to collect all waveforms
             all_streams = Stream()
@@ -198,45 +223,61 @@ class WaveformDownloader:
                 return all_streams
 
             if bulk_download:
-                # Build bulk request list
-                bulk_list, bulk_event_ids = self._build_bulk_request(
-                    events, stations, theoretical_arrivals,
-                    time_before, time_after, channel_list, location
-                )
-                
-                # Download in chunks with progress bar
-                n_chunks = (len(bulk_list) + chunk_size - 1) // chunk_size
-                
-                for i in range(n_chunks):
-                    start_idx = i * chunk_size
-                    end_idx = min((i + 1) * chunk_size, len(bulk_list))
-                    chunk = bulk_list[start_idx:end_idx]
-                    
-                    if self._cancel:
-                        self.logger.info("Download cancelled by user.")
-                        self.progress_manager.complete_task(task_id, success=False, error_message="cancelled")
-                        return all_streams
-                    # Try downloading chunk with retries
-                    for attempt in range(max_retries):
-                        try:
-                            st = client.get_waveforms_bulk(chunk)
-                            # Annotate event_id per returned trace (best-effort by order)
+                # Group stations by provider so we can use multiple FDSN endpoints in one run
+                stations_by_provider: Dict[Optional[str], List[dict]] = {}
+                for sta in stations:
+                    prov_key = sta.get('provider')
+                    stations_by_provider.setdefault(prov_key, []).append(sta)
+
+                for prov_key, prov_stations in stations_by_provider.items():
+                    client_for_group = get_client_for_provider(prov_key)
+                    # Build bulk request list for this provider's stations
+                    bulk_list, bulk_event_ids = self._build_bulk_request(
+                        events, prov_stations, theoretical_arrivals,
+                        time_before, time_after, channel_list, location
+                    )
+                    if not bulk_list:
+                        continue
+
+                    # Download in chunks with progress bar
+                    n_chunks = (len(bulk_list) + chunk_size - 1) // chunk_size
+
+                    for i in range(n_chunks):
+                        start_idx = i * chunk_size
+                        end_idx = min((i + 1) * chunk_size, len(bulk_list))
+                        chunk = bulk_list[start_idx:end_idx]
+
+                        if self._cancel:
+                            self.logger.info("Download cancelled by user.")
+                            self.progress_manager.complete_task(task_id, success=False, error_message="cancelled")
+                            return all_streams
+                        # Try downloading chunk with retries
+                        for attempt in range(max_retries):
                             try:
-                                for j, tr in enumerate(st):
-                                    idx = start_idx + j
-                                    if idx < len(bulk_event_ids):
-                                        tr.stats.event_id = bulk_event_ids[idx]
-                            except Exception:
-                                pass
-                            all_streams += st
-                            self.progress_manager.update_task(task_id, end_idx)
-                            break
-                        except Exception as e:
-                            if attempt < max_retries - 1:
-                                self.logger.warning(f"Chunk {i+1}/{n_chunks} failed (attempt {attempt+1}): {str(e)}. Retrying...")
-                                time.sleep(retry_delay)
-                            else:
-                                self.logger.error(f"Chunk {i+1}/{n_chunks} failed after {max_retries} attempts: {str(e)}")
+                                st = client_for_group.get_waveforms_bulk(chunk)
+                                # Annotate event_id per returned trace (best-effort by order)
+                                try:
+                                    for j, tr in enumerate(st):
+                                        idx = start_idx + j
+                                        if idx < len(bulk_event_ids):
+                                            tr.stats.event_id = bulk_event_ids[idx]
+                                except Exception:
+                                    pass
+                                all_streams += st
+                                self.progress_manager.update_task(task_id, end_idx)
+                                break
+                            except Exception as e:
+                                if attempt < max_retries - 1:
+                                    self.logger.warning(
+                                        f"Chunk {i+1}/{n_chunks} for provider {prov_key or provider} "
+                                        f"failed (attempt {attempt+1}): {str(e)}. Retrying..."
+                                    )
+                                    time.sleep(retry_delay)
+                                else:
+                                    self.logger.error(
+                                        f"Chunk {i+1}/{n_chunks} for provider {prov_key or provider} "
+                                        f"failed after {max_retries} attempts: {str(e)}"
+                                    )
             
             else:
                 # Individual downloads
@@ -262,11 +303,14 @@ class WaveformDownloader:
                         
                         # Resolve channel list for this station using its available channel types
                         per_station_channels = self._resolve_station_channels(channel_list, station)
+                        # Resolve provider for this station (fall back to UI provider)
+                        sta_provider_key = station.get('provider')
+                        client_for_station = get_client_for_provider(sta_provider_key)
                         for channel in per_station_channels:
                             # Try downloading with retries
                             for attempt in range(max_retries):
                                 try:
-                                    st = client.get_waveforms(
+                                    st = client_for_station.get_waveforms(
                                         network=station['network'],
                                         station=station['station'],
                                         location=location,
