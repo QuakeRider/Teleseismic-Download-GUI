@@ -508,22 +508,25 @@ class EventService:
         catalog_source: str,
         event_id: str,
         event_time: str,
-        time_window_seconds: float = 60.0
+        time_window_seconds: float = 60.0,
+        mt_catalogs: List[str] = None
     ) -> Optional[dict]:
         """
         Retrieve detailed information for a specific event, including moment tensor.
 
-        This method queries multiple catalogs to find moment tensor information.
-        It first tries the specified catalog, then tries ISC and GCMT if needed.
+        This method queries specified catalogs to find moment tensor information.
+        It can collect MT data from multiple sources if requested.
 
         Args:
-            catalog_source: Primary catalog name (IRIS, USGS, ISC)
+            catalog_source: Primary catalog name for basic event info (IRIS, USGS, ISC)
             event_id: Event resource ID
             event_time: Event origin time (ISO format)
             time_window_seconds: Time window around event (default: 60 seconds)
+            mt_catalogs: List of catalogs to search for moment tensors
+                        (default: [catalog_source, ISC, USGS])
 
         Returns:
-            Detailed event dictionary with moment tensor, or None if not found
+            Detailed event dictionary with moment tensor(s), or None if not found
         """
         if catalog_source not in self.CATALOG_SOURCES:
             self.logger.error(f"Unknown catalog source: {catalog_source}")
@@ -543,16 +546,20 @@ class EventService:
         starttime = event_utc - time_window_seconds
         endtime = event_utc + time_window_seconds
 
-        # Try multiple catalogs in order of preference for moment tensors
-        # ISC often has GCMT solutions, USGS has its own MT solutions
-        catalogs_to_try = [catalog_source]
-        if catalog_source != "ISC":
-            catalogs_to_try.append("ISC")  # ISC aggregates GCMT and other solutions
-        if catalog_source != "USGS":
-            catalogs_to_try.append("USGS")  # USGS has its own MT solutions
+        # Determine which catalogs to try for moment tensors
+        if mt_catalogs is None:
+            # Default behavior: try primary catalog, then ISC, then USGS
+            catalogs_to_try = [catalog_source]
+            if catalog_source != "ISC":
+                catalogs_to_try.append("ISC")
+            if catalog_source != "USGS":
+                catalogs_to_try.append("USGS")
+        else:
+            # Use user-specified catalogs
+            catalogs_to_try = [c for c in mt_catalogs if c in self.CATALOG_SOURCES]
 
         event_found = None
-        mt_found = False
+        mt_sources = {}  # Store MT data from each catalog: {catalog_name: mt_info}
 
         for attempt_catalog in catalogs_to_try:
             try:
@@ -587,15 +594,18 @@ class EventService:
                 if best_match is None:
                     continue
 
-                event_found = best_match
-                self.logger.info(f"Found matching event in {attempt_catalog} (time diff: {min_time_diff:.2f}s)")
+                # Store the first matching event we find
+                if event_found is None:
+                    event_found = best_match
+                    self.logger.info(f"Found matching event in {attempt_catalog} (time diff: {min_time_diff:.2f}s)")
 
-                # Check if this event has moment tensor
+                # Check if this event has moment tensor and collect it
                 mt_info = self._extract_moment_tensor(best_match)
                 if mt_info is not None and mt_info.get('has_moment_tensor'):
-                    mt_found = True
+                    mt_sources[attempt_catalog] = mt_info
                     self.logger.info(f"Moment tensor found in {attempt_catalog}!")
-                    break  # Found MT, stop searching
+                else:
+                    self.logger.debug(f"No moment tensor in {attempt_catalog}")
 
             except Exception as e:
                 self.logger.debug(f"Error querying {attempt_catalog}: {e}")
@@ -684,12 +694,26 @@ class EventService:
             except Exception:
                 pass
 
-            # Extract moment tensor (already done in the loop above)
-            mt_info = self._extract_moment_tensor(event)
-            if mt_info is not None:
-                event_dict['moment_tensor'] = mt_info
+            # Store collected moment tensor data from all sources
+            if mt_sources:
+                # If only one source, store as before for backward compatibility
+                if len(mt_sources) == 1:
+                    catalog_name = list(mt_sources.keys())[0]
+                    event_dict['moment_tensor'] = mt_sources[catalog_name]
+                    event_dict['moment_tensor']['source_catalog'] = catalog_name
+                else:
+                    # Multiple sources: store all with catalog labels
+                    event_dict['moment_tensors'] = {}
+                    for catalog_name, mt_info in mt_sources.items():
+                        mt_info['source_catalog'] = catalog_name
+                        event_dict['moment_tensors'][catalog_name] = mt_info
+                    # Also keep the first one as 'moment_tensor' for compatibility
+                    first_catalog = list(mt_sources.keys())[0]
+                    event_dict['moment_tensor'] = mt_sources[first_catalog]
+
                 event_dict['has_moment_tensor'] = True
-                self.logger.info(f"Event details complete WITH moment tensor")
+                sources_str = ', '.join(mt_sources.keys())
+                self.logger.info(f"Event details complete WITH moment tensor from: {sources_str}")
             else:
                 event_dict['has_moment_tensor'] = False
                 self.logger.warning(f"Event details complete but NO moment tensor found in any catalog")

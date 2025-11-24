@@ -285,6 +285,24 @@ class MainWindow(QMainWindow):
         form.addRow("End Time:", self.ev_mode_end_dt)
         form.addRow("Magnitude (min/max):", self._row(self.ev_mode_min_mag, self.ev_mode_max_mag))
 
+        # Moment Tensor catalog selection
+        mt_catalog_label = QLabel("MT Catalogs:")
+        mt_catalog_label.setToolTip("Select catalogs to search for moment tensor data when confirming event")
+        mt_catalog_row = QHBoxLayout()
+        self.ev_mode_mt_iris_check = QCheckBox("IRIS")
+        self.ev_mode_mt_iris_check.setToolTip("Basic focal mechanisms")
+        self.ev_mode_mt_usgs_check = QCheckBox("USGS")
+        self.ev_mode_mt_usgs_check.setChecked(True)
+        self.ev_mode_mt_usgs_check.setToolTip("USGS moment tensor solutions")
+        self.ev_mode_mt_isc_check = QCheckBox("ISC")
+        self.ev_mode_mt_isc_check.setChecked(True)
+        self.ev_mode_mt_isc_check.setToolTip("ISC/GCMT moment tensor solutions")
+        mt_catalog_row.addWidget(self.ev_mode_mt_iris_check)
+        mt_catalog_row.addWidget(self.ev_mode_mt_usgs_check)
+        mt_catalog_row.addWidget(self.ev_mode_mt_isc_check)
+        mt_catalog_row.addStretch()
+        form.addRow(mt_catalog_label, self._wrap(mt_catalog_row))
+
         # Buttons for search, confirm, save
         btn_row = QHBoxLayout()
         self.btn_ev_mode_search_events = QPushButton("Search Events")
@@ -640,9 +658,22 @@ class MainWindow(QMainWindow):
         # Re-highlight map with confirmed event (blue ring)
         self._refresh_ev_mode_event_map_highlights()
 
+        # Get selected MT catalogs
+        mt_catalogs = []
+        if self.ev_mode_mt_iris_check.isChecked():
+            mt_catalogs.append("IRIS")
+        if self.ev_mode_mt_usgs_check.isChecked():
+            mt_catalogs.append("USGS")
+        if self.ev_mode_mt_isc_check.isChecked():
+            mt_catalogs.append("ISC")
+
+        if not mt_catalogs:
+            QMessageBox.warning(self, "No MT Catalogs", "Please select at least one catalog for moment tensor search.")
+            return
+
         # Retrieve detailed event information including moment tensor
         self.btn_ev_mode_confirm_event.setEnabled(False)
-        self.logger.info(f"Retrieving detailed information for event {event_id}...")
+        self.logger.info(f"Retrieving detailed information for event {event_id} from catalogs: {', '.join(mt_catalogs)}...")
 
         def on_finished(detailed_event):
             self.btn_ev_mode_confirm_event.setEnabled(True)
@@ -680,7 +711,8 @@ class MainWindow(QMainWindow):
             catalog_source=catalog_source,
             event_id=event_id,
             event_time=event_time,
-            time_window_seconds=60.0
+            time_window_seconds=60.0,
+            mt_catalogs=mt_catalogs
         )
         self._run_worker(worker, on_finished, on_error)
 
