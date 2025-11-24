@@ -265,6 +265,21 @@ class EventService:
                 return None
             # Explicit marker for callers
             info["has_moment_tensor"] = True
+
+            # Log successful extraction at INFO level for visibility
+            try:
+                ev_id = str(getattr(event, "resource_id", "")).split('/')[-1]
+                components = []
+                if "tensor" in info:
+                    components.append("tensor")
+                if "nodal_planes" in info:
+                    components.append(f"{len(info['nodal_planes'])} nodal planes")
+                if "source_agency" in info:
+                    components.append(f"agency={info['source_agency']}")
+                self.logger.info(f"Found moment tensor for event {ev_id}: {', '.join(components)}")
+            except Exception:
+                pass
+
             return info
         except Exception as exc:
             try:
@@ -324,16 +339,36 @@ class EventService:
             endtime = UTCDateTime(end_time)
             
             self.progress_manager.update_task(task_id, 10)
-            
-            # Query catalog
-            catalog = client.get_events(
-                starttime=starttime,
-                endtime=endtime,
-                minmagnitude=min_magnitude,
-                maxmagnitude=max_magnitude,
-                mindepth=min_depth * 1000,  # Convert to meters
-                maxdepth=max_depth * 1000
-            )
+
+            # Query catalog with parameters to include all available metadata
+            # includeallmagnitudes: retrieve all magnitude estimates (Mw, mb, Ms, etc.)
+            # includeallorigins: retrieve all origin estimates (for uncertainties)
+            # includearrivals: retrieve phase arrival data if available
+            # Try with full metadata first; fall back to basic query if service doesn't support these params
+            try:
+                catalog = client.get_events(
+                    starttime=starttime,
+                    endtime=endtime,
+                    minmagnitude=min_magnitude,
+                    maxmagnitude=max_magnitude,
+                    mindepth=min_depth * 1000,  # Convert to meters
+                    maxdepth=max_depth * 1000,
+                    includeallmagnitudes=True,
+                    includeallorigins=True,
+                    includearrivals=True
+                )
+                self.logger.info(f"Retrieved events with full metadata from {catalog_source}")
+            except Exception as e:
+                # Some services may not support these parameters; fall back to basic query
+                self.logger.warning(f"Full metadata query failed ({e}), retrying with basic parameters...")
+                catalog = client.get_events(
+                    starttime=starttime,
+                    endtime=endtime,
+                    minmagnitude=min_magnitude,
+                    maxmagnitude=max_magnitude,
+                    mindepth=min_depth * 1000,  # Convert to meters
+                    maxdepth=max_depth * 1000
+                )
             
             self.progress_manager.update_task(task_id, 50)
             self.logger.info(f"Retrieved {len(catalog)} events from {catalog_source}")
@@ -445,8 +480,14 @@ class EventService:
                     self.progress_manager.update_task(task_id, progress)
             
             self.progress_manager.complete_task(task_id, success=True)
+
+            # Log summary statistics
+            events_with_mt = sum(1 for e in events_with_distance if e.get('has_moment_tensor', False))
             self.logger.info(f"Filtered to {len(events_with_distance)} events in distance range")
-            
+            self.logger.info(f"Events with moment tensor information: {events_with_mt}/{len(events_with_distance)}")
+            if events_with_mt == 0 and len(events_with_distance) > 0:
+                self.logger.warning("No moment tensors found. Try larger magnitude events (M > 5.5) or a different catalog.")
+
             return events_with_distance
             
         except Exception as e:
