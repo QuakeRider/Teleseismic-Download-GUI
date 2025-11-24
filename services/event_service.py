@@ -155,6 +155,37 @@ class EventService:
         self.progress_manager = progress_manager
         self.logger = logger
     
+    def _extract_event_id(self, event) -> str:
+        """
+        Extract clean event ID from ObsPy Event resource_id.
+
+        Handles various formats:
+        - smi:service.iris.edu/fdsnws/event/1/query?eventid=755871 -> 755871
+        - smi:earthquake.usgs.gov/earthquakes/eventpage/usp0009m0p -> usp0009m0p
+        - quakeml:earthquake.usgs.gov/archive/product/... -> (last component)
+
+        Args:
+            event: ObsPy Event object
+
+        Returns:
+            Clean event ID string
+        """
+        try:
+            resource_id = str(event.resource_id)
+
+            # Check if it contains query parameters (e.g., query?eventid=755871)
+            if 'eventid=' in resource_id:
+                # Extract the event ID from the query parameter
+                import re
+                match = re.search(r'eventid=([^&\s]+)', resource_id)
+                if match:
+                    return match.group(1)
+
+            # Otherwise, take the last component after splitting by /
+            return resource_id.split('/')[-1]
+        except Exception:
+            return "unknown"
+
     def _extract_moment_tensor(self, event) -> Optional[Dict]:
         """Extract moment tensor and focal mechanism info from an ObsPy Event, if available.
 
@@ -376,7 +407,7 @@ class EventService:
                 if min_distance <= distance_deg <= max_distance:
                     # Base origin/magnitude information
                     event_dict: Dict[str, object] = {
-                        'event_id': str(event.resource_id).split('/')[-1],
+                        'event_id': self._extract_event_id(event),
                         'time': origin.time.datetime.isoformat(),
                         'latitude': origin.latitude,
                         'longitude': origin.longitude,
@@ -449,13 +480,10 @@ class EventService:
                         # Magnitudes list may be missing or oddly structured; ignore errors
                         pass
 
-                    # Attach moment tensor / focal mechanism info if available
-                    mt_info = self._extract_moment_tensor(event)
-                    if mt_info is not None:
-                        event_dict['moment_tensor'] = mt_info
-                        event_dict['has_moment_tensor'] = True
-                    else:
-                        event_dict['has_moment_tensor'] = False
+                    # Note: Moment tensor extraction is deferred until event confirmation
+                    # to avoid overloading catalog services during initial search.
+                    # Set has_moment_tensor to False initially; will be updated on confirmation.
+                    event_dict['has_moment_tensor'] = False
 
                     events_with_distance.append(event_dict)
                 
@@ -465,14 +493,9 @@ class EventService:
                     self.progress_manager.update_task(task_id, progress)
             
             self.progress_manager.complete_task(task_id, success=True)
-
-            # Log summary statistics
-            events_with_mt = sum(1 for e in events_with_distance if e.get('has_moment_tensor', False))
             self.logger.info(f"Filtered to {len(events_with_distance)} events in distance range")
-            self.logger.info(f"Events with moment tensor information: {events_with_mt}/{len(events_with_distance)}")
-            if events_with_mt == 0 and len(events_with_distance) > 0:
-                self.logger.warning("No moment tensors found. Try larger magnitude events (M > 5.5) or a different catalog.")
 
+            # Note: Moment tensors are retrieved when confirming individual events
             return events_with_distance
             
         except Exception as e:
@@ -490,12 +513,11 @@ class EventService:
         """
         Retrieve detailed information for a specific event, including moment tensor.
 
-        This method queries the catalog for a specific event using its ID and time,
-        requesting all available metadata including focal mechanisms and moment tensors.
-        Use this after confirming an event to get complete moment tensor information.
+        This method queries multiple catalogs to find moment tensor information.
+        It first tries the specified catalog, then tries ISC and GCMT if needed.
 
         Args:
-            catalog_source: Catalog name (IRIS, USGS, ISC)
+            catalog_source: Primary catalog name (IRIS, USGS, ISC)
             event_id: Event resource ID
             event_time: Event origin time (ISO format)
             time_window_seconds: Time window around event (default: 60 seconds)
@@ -508,32 +530,39 @@ class EventService:
             return None
 
         task_id = "event_detail"
-        self.progress_manager.create_task(task_id, 100, f"Retrieving event details from {catalog_source}")
+        self.progress_manager.create_task(task_id, 100, f"Retrieving event details")
 
+        # Parse event time
         try:
-            # Create client
-            client_name = self.CATALOG_SOURCES[catalog_source]
-            client = Client(client_name, timeout=120)
-
-            # Parse event time and create search window
             event_utc = UTCDateTime(event_time)
-            starttime = event_utc - time_window_seconds
-            endtime = event_utc + time_window_seconds
+        except Exception as e:
+            self.logger.error(f"Invalid event time format: {e}")
+            self.progress_manager.complete_task(task_id, success=False, error_message=str(e))
+            return None
 
-            self.progress_manager.update_task(task_id, 30)
+        starttime = event_utc - time_window_seconds
+        endtime = event_utc + time_window_seconds
 
-            # Query for the specific event using eventid if possible, otherwise time window
+        # Try multiple catalogs in order of preference for moment tensors
+        # ISC often has GCMT solutions, USGS has its own MT solutions
+        catalogs_to_try = [catalog_source]
+        if catalog_source != "ISC":
+            catalogs_to_try.append("ISC")  # ISC aggregates GCMT and other solutions
+        if catalog_source != "USGS":
+            catalogs_to_try.append("USGS")  # USGS has its own MT solutions
+
+        event_found = None
+        mt_found = False
+
+        for attempt_catalog in catalogs_to_try:
             try:
-                # Try using eventid parameter (works for some services)
-                self.logger.info(f"Querying {catalog_source} for event ID: {event_id}")
-                catalog = client.get_events(
-                    eventid=event_id,
-                    includeallmagnitudes=True,
-                    includeallorigins=True
-                )
-            except Exception as e:
-                # Fallback: query by time window if eventid doesn't work
-                self.logger.info(f"Event ID query failed, trying time window: {e}")
+                self.logger.info(f"Trying {attempt_catalog} for event details...")
+                client_name = self.CATALOG_SOURCES[attempt_catalog]
+                client = Client(client_name, timeout=120)
+
+                self.progress_manager.update_task(task_id, 20 + (catalogs_to_try.index(attempt_catalog) * 20))
+
+                # Query by time window (more reliable than eventid which varies by catalog)
                 catalog = client.get_events(
                     starttime=starttime,
                     endtime=endtime,
@@ -541,21 +570,53 @@ class EventService:
                     includeallorigins=True
                 )
 
-            self.progress_manager.update_task(task_id, 70)
+                if len(catalog) == 0:
+                    self.logger.debug(f"No events found in {attempt_catalog}")
+                    continue
 
-            if len(catalog) == 0:
-                self.logger.warning(f"Event not found: {event_id}")
-                self.progress_manager.complete_task(task_id, success=False, error_message="Event not found")
-                return None
+                # Find the closest event by time
+                best_match = None
+                min_time_diff = float('inf')
+                for evt in catalog:
+                    origin = evt.preferred_origin() or evt.origins[0]
+                    time_diff = abs((origin.time - event_utc))
+                    if time_diff < min_time_diff:
+                        min_time_diff = time_diff
+                        best_match = evt
 
-            # Use the first event (should be the only one if eventid worked)
-            event = catalog[0]
+                if best_match is None:
+                    continue
+
+                event_found = best_match
+                self.logger.info(f"Found matching event in {attempt_catalog} (time diff: {min_time_diff:.2f}s)")
+
+                # Check if this event has moment tensor
+                mt_info = self._extract_moment_tensor(best_match)
+                if mt_info is not None and mt_info.get('has_moment_tensor'):
+                    mt_found = True
+                    self.logger.info(f"Moment tensor found in {attempt_catalog}!")
+                    break  # Found MT, stop searching
+
+            except Exception as e:
+                self.logger.debug(f"Error querying {attempt_catalog}: {e}")
+                continue
+
+        self.progress_manager.update_task(task_id, 70)
+
+        # Check if we found an event
+        if event_found is None:
+            self.logger.warning(f"Event not found in any catalog")
+            self.progress_manager.complete_task(task_id, success=False, error_message="Event not found")
+            return None
+
+        try:
+            # Build detailed event dictionary from the found event
+            event = event_found
             origin = event.preferred_origin() or event.origins[0]
             magnitude = event.preferred_magnitude() or event.magnitudes[0]
 
-            # Build detailed event dictionary
             event_dict: Dict[str, object] = {
-                'event_id': str(event.resource_id).split('/')[-1],
+                'event_id': self._extract_event_id(event),
                 'time': origin.time.datetime.isoformat(),
                 'latitude': origin.latitude,
                 'longitude': origin.longitude,
@@ -623,21 +684,21 @@ class EventService:
             except Exception:
                 pass
 
-            # Extract moment tensor
+            # Extract moment tensor (already done in the loop above)
             mt_info = self._extract_moment_tensor(event)
             if mt_info is not None:
                 event_dict['moment_tensor'] = mt_info
                 event_dict['has_moment_tensor'] = True
+                self.logger.info(f"Event details complete WITH moment tensor")
             else:
                 event_dict['has_moment_tensor'] = False
+                self.logger.warning(f"Event details complete but NO moment tensor found in any catalog")
 
             self.progress_manager.complete_task(task_id, success=True)
-            self.logger.info(f"Retrieved detailed event information for {event_id}")
-
             return event_dict
 
         except Exception as e:
-            self.logger.error(f"Failed to retrieve event details: {e}")
+            self.logger.error(f"Failed to build event details: {e}")
             self.progress_manager.complete_task(task_id, success=False, error_message=str(e))
             return None
 
