@@ -343,32 +343,17 @@ class EventService:
             # Query catalog with parameters to include all available metadata
             # includeallmagnitudes: retrieve all magnitude estimates (Mw, mb, Ms, etc.)
             # includeallorigins: retrieve all origin estimates (for uncertainties)
-            # includearrivals: retrieve phase arrival data if available
-            # Try with full metadata first; fall back to basic query if service doesn't support these params
-            try:
-                catalog = client.get_events(
-                    starttime=starttime,
-                    endtime=endtime,
-                    minmagnitude=min_magnitude,
-                    maxmagnitude=max_magnitude,
-                    mindepth=min_depth * 1000,  # Convert to meters
-                    maxdepth=max_depth * 1000,
-                    includeallmagnitudes=True,
-                    includeallorigins=True,
-                    includearrivals=True
-                )
-                self.logger.info(f"Retrieved events with full metadata from {catalog_source}")
-            except Exception as e:
-                # Some services may not support these parameters; fall back to basic query
-                self.logger.warning(f"Full metadata query failed ({e}), retrying with basic parameters...")
-                catalog = client.get_events(
-                    starttime=starttime,
-                    endtime=endtime,
-                    minmagnitude=min_magnitude,
-                    maxmagnitude=max_magnitude,
-                    mindepth=min_depth * 1000,  # Convert to meters
-                    maxdepth=max_depth * 1000
-                )
+            # Note: includearrivals is NOT used because USGS and some others don't support it
+            catalog = client.get_events(
+                starttime=starttime,
+                endtime=endtime,
+                minmagnitude=min_magnitude,
+                maxmagnitude=max_magnitude,
+                mindepth=min_depth * 1000,  # Convert to meters
+                maxdepth=max_depth * 1000,
+                includeallmagnitudes=True,
+                includeallorigins=True
+            )
             
             self.progress_manager.update_task(task_id, 50)
             self.logger.info(f"Retrieved {len(catalog)} events from {catalog_source}")
@@ -495,6 +480,167 @@ class EventService:
             self.progress_manager.complete_task(task_id, success=False, error_message=str(e))
             return []
     
+    def get_event_details(
+        self,
+        catalog_source: str,
+        event_id: str,
+        event_time: str,
+        time_window_seconds: float = 60.0
+    ) -> Optional[dict]:
+        """
+        Retrieve detailed information for a specific event, including moment tensor.
+
+        This method queries the catalog for a specific event using its ID and time,
+        requesting all available metadata including focal mechanisms and moment tensors.
+        Use this after confirming an event to get complete moment tensor information.
+
+        Args:
+            catalog_source: Catalog name (IRIS, USGS, ISC)
+            event_id: Event resource ID
+            event_time: Event origin time (ISO format)
+            time_window_seconds: Time window around event (default: 60 seconds)
+
+        Returns:
+            Detailed event dictionary with moment tensor, or None if not found
+        """
+        if catalog_source not in self.CATALOG_SOURCES:
+            self.logger.error(f"Unknown catalog source: {catalog_source}")
+            return None
+
+        task_id = "event_detail"
+        self.progress_manager.create_task(task_id, 100, f"Retrieving event details from {catalog_source}")
+
+        try:
+            # Create client
+            client_name = self.CATALOG_SOURCES[catalog_source]
+            client = Client(client_name, timeout=120)
+
+            # Parse event time and create search window
+            event_utc = UTCDateTime(event_time)
+            starttime = event_utc - time_window_seconds
+            endtime = event_utc + time_window_seconds
+
+            self.progress_manager.update_task(task_id, 30)
+
+            # Query for the specific event using eventid if possible, otherwise time window
+            try:
+                # Try using eventid parameter (works for some services)
+                self.logger.info(f"Querying {catalog_source} for event ID: {event_id}")
+                catalog = client.get_events(
+                    eventid=event_id,
+                    includeallmagnitudes=True,
+                    includeallorigins=True
+                )
+            except Exception as e:
+                # Fallback: query by time window if eventid doesn't work
+                self.logger.info(f"Event ID query failed, trying time window: {e}")
+                catalog = client.get_events(
+                    starttime=starttime,
+                    endtime=endtime,
+                    includeallmagnitudes=True,
+                    includeallorigins=True
+                )
+
+            self.progress_manager.update_task(task_id, 70)
+
+            if len(catalog) == 0:
+                self.logger.warning(f"Event not found: {event_id}")
+                self.progress_manager.complete_task(task_id, success=False, error_message="Event not found")
+                return None
+
+            # Use the first event (should be the only one if eventid worked)
+            event = catalog[0]
+            origin = event.preferred_origin() or event.origins[0]
+            magnitude = event.preferred_magnitude() or event.magnitudes[0]
+
+            # Build detailed event dictionary
+            event_dict: Dict[str, object] = {
+                'event_id': str(event.resource_id).split('/')[-1],
+                'time': origin.time.datetime.isoformat(),
+                'latitude': origin.latitude,
+                'longitude': origin.longitude,
+                'depth': origin.depth / 1000.0,  # Convert to km
+                'magnitude': magnitude.mag,
+                'magnitude_type': magnitude.magnitude_type,
+                'catalog_source': catalog_source,
+            }
+
+            # Origin uncertainties
+            try:
+                time_errors = getattr(origin, 'time_errors', None)
+                if time_errors is not None:
+                    u = getattr(time_errors, 'uncertainty', None)
+                    if u is not None:
+                        event_dict['origin_time_uncertainty_s'] = float(u)
+                lat_errors = getattr(origin, 'latitude_errors', None)
+                if lat_errors is not None:
+                    u = getattr(lat_errors, 'uncertainty', None)
+                    if u is not None:
+                        event_dict['latitude_uncertainty_deg'] = float(u)
+                lon_errors = getattr(origin, 'longitude_errors', None)
+                if lon_errors is not None:
+                    u = getattr(lon_errors, 'uncertainty', None)
+                    if u is not None:
+                        event_dict['longitude_uncertainty_deg'] = float(u)
+                depth_errors = getattr(origin, 'depth_errors', None)
+                if depth_errors is not None:
+                    u = getattr(depth_errors, 'uncertainty', None)
+                    if u is not None:
+                        event_dict['depth_uncertainty_km'] = float(u) / 1000.0
+            except Exception:
+                pass
+
+            # Additional magnitudes
+            try:
+                mw_mag = None; mb_mag = None; ms_mag = None
+                for mag in getattr(event, 'magnitudes', []) or []:
+                    mtype = getattr(mag, 'magnitude_type', None)
+                    key = (mtype or '').upper()
+                    if key == 'MW' and mw_mag is None:
+                        mw_mag = mag
+                    elif key == 'MB' and mb_mag is None:
+                        mb_mag = mag
+                    elif key in ('MS', 'MS_BB') and ms_mag is None:
+                        ms_mag = mag
+                def _store_mag(prefix: str, mag_obj) -> None:
+                    if mag_obj is None:
+                        return
+                    try:
+                        event_dict[f'{prefix}'] = float(mag_obj.mag)
+                    except Exception:
+                        pass
+                    mtype = getattr(mag_obj, 'magnitude_type', None)
+                    if mtype:
+                        event_dict[f'{prefix}_type'] = str(mtype)
+                    ci = getattr(mag_obj, 'creation_info', None)
+                    if ci is not None:
+                        author = getattr(ci, 'author', None)
+                        if author:
+                            event_dict[f'{prefix}_author'] = str(author)
+                _store_mag('mw', mw_mag)
+                _store_mag('mb', mb_mag)
+                _store_mag('ms', ms_mag)
+            except Exception:
+                pass
+
+            # Extract moment tensor
+            mt_info = self._extract_moment_tensor(event)
+            if mt_info is not None:
+                event_dict['moment_tensor'] = mt_info
+                event_dict['has_moment_tensor'] = True
+            else:
+                event_dict['has_moment_tensor'] = False
+
+            self.progress_manager.complete_task(task_id, success=True)
+            self.logger.info(f"Retrieved detailed event information for {event_id}")
+
+            return event_dict
+
+        except Exception as e:
+            self.logger.error(f"Failed to retrieve event details: {e}")
+            self.progress_manager.complete_task(task_id, success=False, error_message=str(e))
+            return None
+
     def compute_event_distances(
         self,
         events: List[dict],
