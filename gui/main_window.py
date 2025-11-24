@@ -285,6 +285,24 @@ class MainWindow(QMainWindow):
         form.addRow("End Time:", self.ev_mode_end_dt)
         form.addRow("Magnitude (min/max):", self._row(self.ev_mode_min_mag, self.ev_mode_max_mag))
 
+        # Moment Tensor catalog selection
+        mt_catalog_label = QLabel("MT Catalogs:")
+        mt_catalog_label.setToolTip("Select catalogs to search for moment tensor data when confirming event")
+        mt_catalog_row = QHBoxLayout()
+        self.ev_mode_mt_iris_check = QCheckBox("IRIS")
+        self.ev_mode_mt_iris_check.setToolTip("Basic focal mechanisms")
+        self.ev_mode_mt_usgs_check = QCheckBox("USGS")
+        self.ev_mode_mt_usgs_check.setChecked(True)
+        self.ev_mode_mt_usgs_check.setToolTip("USGS moment tensor solutions")
+        self.ev_mode_mt_isc_check = QCheckBox("ISC")
+        self.ev_mode_mt_isc_check.setChecked(True)
+        self.ev_mode_mt_isc_check.setToolTip("ISC/GCMT moment tensor solutions")
+        mt_catalog_row.addWidget(self.ev_mode_mt_iris_check)
+        mt_catalog_row.addWidget(self.ev_mode_mt_usgs_check)
+        mt_catalog_row.addWidget(self.ev_mode_mt_isc_check)
+        mt_catalog_row.addStretch()
+        form.addRow(mt_catalog_label, self._wrap(mt_catalog_row))
+
         # Buttons for search, confirm, save
         btn_row = QHBoxLayout()
         self.btn_ev_mode_search_events = QPushButton("Search Events")
@@ -615,26 +633,88 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_ev_mode_confirm_event(self):
-        """Confirm currently checked event and propagate its info to Stations tab."""
+        """Confirm currently checked event and retrieve detailed moment tensor information."""
         if self.ev_mode_confirmed_index is None or not self.current_event:
             QMessageBox.warning(self, "No Event Selected", "Please check one event in the table before confirming.")
             return
 
         ev = self.current_event
+        event_id = ev.get('event_id', '')
+        event_time = ev.get('time', '')
+        catalog_source = ev.get('catalog_source', 'USGS')
+
         # Update summary label
         summary = (
-            f"Confirmed event: {ev.get('event_id', '')} | "
+            f"Confirmed event: {event_id} | "
             f"M{ev.get('magnitude', 0):.1f} | "
-            f"{ev.get('time', '')} | "
+            f"{event_time} | "
             f"({ev.get('latitude', 0):.3f}, {ev.get('longitude', 0):.3f})"
         )
-        self.ev_mode_selected_event_label.setText(summary)
+        self.ev_mode_selected_event_label.setText(summary + " [Retrieving moment tensor...]")
 
         # Update station time window based on event time
         self._update_ev_mode_station_time_from_event()
 
         # Re-highlight map with confirmed event (blue ring)
         self._refresh_ev_mode_event_map_highlights()
+
+        # Get selected MT catalogs
+        mt_catalogs = []
+        if self.ev_mode_mt_iris_check.isChecked():
+            mt_catalogs.append("IRIS")
+        if self.ev_mode_mt_usgs_check.isChecked():
+            mt_catalogs.append("USGS")
+        if self.ev_mode_mt_isc_check.isChecked():
+            mt_catalogs.append("ISC")
+
+        if not mt_catalogs:
+            QMessageBox.warning(self, "No MT Catalogs", "Please select at least one catalog for moment tensor search.")
+            return
+
+        # Retrieve detailed event information including moment tensor
+        self.btn_ev_mode_confirm_event.setEnabled(False)
+        self.logger.info(f"Retrieving detailed information for event {event_id} from catalogs: {', '.join(mt_catalogs)}...")
+
+        def on_finished(detailed_event):
+            self.btn_ev_mode_confirm_event.setEnabled(True)
+            if detailed_event is None:
+                self.logger.warning(f"Could not retrieve detailed event information for {event_id}")
+                self.ev_mode_selected_event_label.setText(summary + " [Moment tensor: not available]")
+                return
+
+            # Update current_event with detailed information
+            self.current_event.update(detailed_event)
+
+            # Also update in events list
+            if self.ev_mode_confirmed_index is not None and self.ev_mode_confirmed_index < len(self.events):
+                self.events[self.ev_mode_confirmed_index].update(detailed_event)
+
+            # Update summary with MT status
+            has_mt = detailed_event.get('has_moment_tensor', False)
+            mt_status = "with moment tensor" if has_mt else "no moment tensor"
+            self.ev_mode_selected_event_label.setText(summary + f" [{mt_status}]")
+
+            if has_mt:
+                mt_info = detailed_event.get('moment_tensor', {})
+                agency = mt_info.get('source_agency', 'unknown')
+                self.logger.info(f"Moment tensor found for {event_id} (source: {agency})")
+            else:
+                self.logger.info(f"No moment tensor available for {event_id}")
+
+        def on_error(msg):
+            self.btn_ev_mode_confirm_event.setEnabled(True)
+            self.logger.error(f"Failed to retrieve event details: {msg}")
+            self.ev_mode_selected_event_label.setText(summary + " [Error retrieving details]")
+
+        worker = WorkerThread(
+            self.event_service.get_event_details,
+            catalog_source=catalog_source,
+            event_id=event_id,
+            event_time=event_time,
+            time_window_seconds=60.0,
+            mt_catalogs=mt_catalogs
+        )
+        self._run_worker(worker, on_finished, on_error)
 
     def _update_ev_mode_station_time_from_event(self):
         """Set station time window around the confirmed event time (±1 day by default)."""
