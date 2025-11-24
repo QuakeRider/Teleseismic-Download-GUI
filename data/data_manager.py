@@ -44,6 +44,7 @@ class DataManager:
             'waveforms_metadata': [],  # List of downloaded waveform metadata
             'study_area': None,  # Study area ROI (dict with bbox or circle)
             'download_config': {},  # Download configuration parameters
+            'arrivals': {},  # Theoretical arrival details per event-station pair
             'history': []  # Processing history
         }
         self._initialized = True
@@ -152,6 +153,15 @@ class DataManager:
     def get_events(self) -> List[Dict]:
         """Retrieve event list."""
         return self.state['events']
+
+    def set_arrivals(self, arrivals: Dict):
+        """Store theoretical arrival details for event-station pairs."""
+        self.state['arrivals'] = arrivals or {}
+        self._add_history('set_arrivals', {'count': len(self.state['arrivals'])})
+
+    def get_arrivals(self) -> Dict:
+        """Retrieve stored arrivals mapping."""
+        return self.state.get('arrivals', {})
     
     def set_study_area(self, study_area: Dict):
         """Store study area ROI."""
@@ -232,12 +242,23 @@ class DataManager:
             return False
 
     def export_events_csv(self, output_file: str) -> bool:
-        """Export current events list to CSV for downstream tools."""
+        """Export current events list to CSV for downstream tools.
+
+        The CSV remains relatively flat and human-readable but includes
+        additional scalar fields useful for source-parameter analysis when
+        available (uncertainties, multiple magnitudes, MT flag).
+        """
         try:
             import csv
             fieldnames = [
                 'event_id','time','latitude','longitude','depth','magnitude',
-                'magnitude_type','distance_deg','catalog_source'
+                'magnitude_type','distance_deg','catalog_source',
+                'origin_time_uncertainty_s','latitude_uncertainty_deg',
+                'longitude_uncertainty_deg','depth_uncertainty_km',
+                'mw','mw_type','mw_author',
+                'mb','mb_type','mb_author',
+                'ms','ms_type','ms_author',
+                'has_moment_tensor',
             ]
             Path(output_file).parent.mkdir(parents=True, exist_ok=True)
             with open(output_file, 'w', newline='', encoding='utf-8') as f:
@@ -256,11 +277,34 @@ class DataManager:
         try:
             Path(output_file).parent.mkdir(parents=True, exist_ok=True)
             with open(output_file, 'w', encoding='utf-8') as f:
-                # state['events'] should already be JSON-serializable
+                # state['events'] should already be JSON-serializable (including
+                # nested moment_tensor, uncertainties, and multiple magnitudes).
                 json.dump(self.state['events'], f, indent=2)
             return True
         except Exception as e:
             print(f"Failed to export events JSON: {e}")
+            return False
+
+    def export_stations_json(self, output_file: str) -> bool:
+        """Export current stations list (full metadata) to a JSON file."""
+        try:
+            Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(self.state['stations'], f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Failed to export stations JSON: {e}")
+            return False
+
+    def export_arrivals_json(self, output_file: str) -> bool:
+        """Export stored arrival details to JSON for downstream analysis."""
+        try:
+            Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(self.get_arrivals(), f, indent=2)
+            return True
+        except Exception as e:
+            print(f"Failed to export arrivals JSON: {e}")
             return False
     
     def clear_state(self):
@@ -271,6 +315,7 @@ class DataManager:
             'waveforms_metadata': [],
             'study_area': None,
             'download_config': {},
+            'arrivals': {},
             'history': []
         }
     

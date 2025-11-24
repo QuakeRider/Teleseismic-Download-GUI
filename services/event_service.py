@@ -162,6 +162,11 @@ class EventService:
         - tensor: dict with m_rr, m_tt, m_pp, m_rt, m_rp, m_tp (if present)
         - scalar_moment: scalar moment value (if present)
         - nodal_planes: list of nodal plane dictionaries with strike/dip/rake
+        - source_agency / source_author: provenance from creation_info if available
+
+        This helper is intentionally defensive so that partial or slightly
+        malformed catalog metadata (e.g. some GCMT solutions) do not cause the
+        entire event to be dropped.
         """
         try:
             fm = None
@@ -170,44 +175,96 @@ class EventService:
             except Exception:
                 fm = None
             if fm is None and getattr(event, "focal_mechanisms", None):
-                fm = event.focal_mechanisms[0]
+                # Fall back to first focal mechanism if no "preferred" is marked
+                try:
+                    fm = event.focal_mechanisms[0]
+                except Exception:
+                    fm = None
             if fm is None:
                 return None
 
             info: Dict[str, object] = {}
 
+            # Provenance from creation_info if present (GCMT/USGS/etc.)
+            try:
+                ci = getattr(fm, "creation_info", None)
+                if ci is not None:
+                    agency_id = getattr(ci, "agency_id", None)
+                    author = getattr(ci, "author", None)
+                    if agency_id:
+                        info["source_agency"] = str(agency_id)
+                    if author:
+                        info["source_author"] = str(author)
+            except Exception:
+                # Best-effort only; do not fail event on provenance
+                pass
+
             mt = getattr(fm, "moment_tensor", None)
             if mt is not None:
+                # Moment-tensor-specific provenance can override focal-mechanism level
+                try:
+                    mt_ci = getattr(mt, "creation_info", None)
+                    if mt_ci is not None:
+                        agency_id = getattr(mt_ci, "agency_id", None)
+                        author = getattr(mt_ci, "author", None)
+                        if agency_id:
+                            info["source_agency"] = str(agency_id)
+                        if author:
+                            info["source_author"] = str(author)
+                except Exception:
+                    pass
+
                 tensor = getattr(mt, "tensor", None)
                 tensor_dict: Dict[str, float] = {}
                 if tensor is not None:
                     for comp in ("m_rr", "m_tt", "m_pp", "m_rt", "m_rp", "m_tp"):
-                        val = getattr(tensor, comp, None)
+                        try:
+                            val = getattr(tensor, comp, None)
+                        except Exception:
+                            val = None
                         if val is not None:
-                            tensor_dict[comp] = float(val)
+                            try:
+                                tensor_dict[comp] = float(val)
+                            except Exception:
+                                continue
                 if tensor_dict:
                     info["tensor"] = tensor_dict
-                scalar_moment = getattr(mt, "scalar_moment", None)
-                if scalar_moment is not None:
-                    info["scalar_moment"] = float(scalar_moment)
+                try:
+                    scalar_moment = getattr(mt, "scalar_moment", None)
+                    if scalar_moment is not None:
+                        info["scalar_moment"] = float(scalar_moment)
+                except Exception:
+                    pass
 
+            # Nodal planes (strike/dip/rake)
             nodal_planes = []
             np_obj = getattr(fm, "nodal_planes", None)
             if np_obj is not None:
                 for plane_name in ("nodal_plane_1", "nodal_plane_2"):
-                    plane = getattr(np_obj, plane_name, None)
+                    try:
+                        plane = getattr(np_obj, plane_name, None)
+                    except Exception:
+                        plane = None
                     if plane is not None:
-                        nodal_planes.append({
-                            "name": plane_name,
-                            "strike": float(getattr(plane, "strike", 0.0)) if getattr(plane, "strike", None) is not None else None,
-                            "dip": float(getattr(plane, "dip", 0.0)) if getattr(plane, "dip", None) is not None else None,
-                            "rake": float(getattr(plane, "rake", 0.0)) if getattr(plane, "rake", None) is not None else None,
-                        })
+                        try:
+                            strike = getattr(plane, "strike", None)
+                            dip = getattr(plane, "dip", None)
+                            rake = getattr(plane, "rake", None)
+                            nodal_planes.append({
+                                "name": plane_name,
+                                "strike": float(strike) if strike is not None else None,
+                                "dip": float(dip) if dip is not None else None,
+                                "rake": float(rake) if rake is not None else None,
+                            })
+                        except Exception:
+                            continue
             if nodal_planes:
                 info["nodal_planes"] = nodal_planes
 
             if not info:
                 return None
+            # Explicit marker for callers
+            info["has_moment_tensor"] = True
             return info
         except Exception as exc:
             try:
@@ -288,16 +345,17 @@ class EventService:
             for i, event in enumerate(catalog):
                 origin = event.preferred_origin() or event.origins[0]
                 magnitude = event.preferred_magnitude() or event.magnitudes[0]
-                
+
                 # Compute epicentral distance
                 distance_deg = locations2degrees(
                     center_lat, center_lon,
                     origin.latitude, origin.longitude
                 )
-                
+
                 # Filter by distance
                 if min_distance <= distance_deg <= max_distance:
-                    event_dict = {
+                    # Base origin/magnitude information
+                    event_dict: Dict[str, object] = {
                         'event_id': str(event.resource_id).split('/')[-1],
                         'time': origin.time.datetime.isoformat(),
                         'latitude': origin.latitude,
@@ -306,13 +364,78 @@ class EventService:
                         'magnitude': magnitude.mag,
                         'magnitude_type': magnitude.magnitude_type,
                         'distance_deg': round(distance_deg, 2),
-                        'catalog_source': catalog_source
+                        'catalog_source': catalog_source,
                     }
+
+                    # Origin uncertainties (best-effort; all fields optional)
+                    try:
+                        # ObsPy Origin may expose *_errors attributes with .uncertainty
+                        time_errors = getattr(origin, 'time_errors', None)
+                        if time_errors is not None:
+                            u = getattr(time_errors, 'uncertainty', None)
+                            if u is not None:
+                                event_dict['origin_time_uncertainty_s'] = float(u)
+                        lat_errors = getattr(origin, 'latitude_errors', None)
+                        if lat_errors is not None:
+                            u = getattr(lat_errors, 'uncertainty', None)
+                            if u is not None:
+                                event_dict['latitude_uncertainty_deg'] = float(u)
+                        lon_errors = getattr(origin, 'longitude_errors', None)
+                        if lon_errors is not None:
+                            u = getattr(lon_errors, 'uncertainty', None)
+                            if u is not None:
+                                event_dict['longitude_uncertainty_deg'] = float(u)
+                        depth_errors = getattr(origin, 'depth_errors', None)
+                        if depth_errors is not None:
+                            u = getattr(depth_errors, 'uncertainty', None)
+                            if u is not None:
+                                # depth is in meters, convert to km
+                                event_dict['depth_uncertainty_km'] = float(u) / 1000.0
+                    except Exception:
+                        # Uncertainties are optional; ignore problems here
+                        pass
+
+                    # Additional magnitudes (Mw, mb, Ms) if available
+                    try:
+                        mw_mag = None; mb_mag = None; ms_mag = None
+                        for mag in getattr(event, 'magnitudes', []) or []:
+                            mtype = getattr(mag, 'magnitude_type', None)
+                            key = (mtype or '').upper()
+                            if key == 'MW' and mw_mag is None:
+                                mw_mag = mag
+                            elif key == 'MB' and mb_mag is None:
+                                mb_mag = mag
+                            elif key in ('MS', 'MS_BB') and ms_mag is None:
+                                ms_mag = mag
+                        def _store_mag(prefix: str, mag_obj) -> None:
+                            if mag_obj is None:
+                                return
+                            try:
+                                event_dict[f'{prefix}'] = float(mag_obj.mag)
+                            except Exception:
+                                pass
+                            mtype = getattr(mag_obj, 'magnitude_type', None)
+                            if mtype:
+                                event_dict[f'{prefix}_type'] = str(mtype)
+                            ci = getattr(mag_obj, 'creation_info', None)
+                            if ci is not None:
+                                author = getattr(ci, 'author', None)
+                                if author:
+                                    event_dict[f'{prefix}_author'] = str(author)
+                        _store_mag('mw', mw_mag)
+                        _store_mag('mb', mb_mag)
+                        _store_mag('ms', ms_mag)
+                    except Exception:
+                        # Magnitudes list may be missing or oddly structured; ignore errors
+                        pass
 
                     # Attach moment tensor / focal mechanism info if available
                     mt_info = self._extract_moment_tensor(event)
                     if mt_info is not None:
                         event_dict['moment_tensor'] = mt_info
+                        event_dict['has_moment_tensor'] = True
+                    else:
+                        event_dict['has_moment_tensor'] = False
 
                     events_with_distance.append(event_dict)
                 

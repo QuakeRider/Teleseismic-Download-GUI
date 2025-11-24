@@ -88,42 +88,37 @@ class WaveformDownloader:
         phases: List[str] = None,
         model: str = 'iasp91'
     ) -> Dict[str, Dict[str, float]]:
-        """
-        Compute theoretical phase arrival times for event-station pairs.
-        
-        Args:
-            events: List of event dictionaries
-            stations: List of station dictionaries
-            phases: List of phase names to compute (default: ['P', 'S'])
-            model: Velocity model name
-            
-        Returns:
-            Dictionary {event_id-net.sta: {phase: arrival_time_seconds}}
+        """Compute theoretical phase arrival *times* for event-station pairs.
+
+        This legacy helper returns only per-phase travel times (in seconds)
+        and is used by the download code to define time windows around P.
+        For richer metadata (takeoff angle, ray parameter, etc.), see
+        :meth:`compute_arrival_details`.
         """
         if phases is None:
             phases = ['P', 'S']
-        
-        arrivals_dict = {}
+
+        arrivals_dict: Dict[str, Dict[str, float]] = {}
         taup = self._ensure_taup_model(model)
-        
+
         from obspy.geodetics import locations2degrees
-        
+
         for event in events:
             event_id = event['event_id']
             event_lat = event['latitude']
             event_lon = event['longitude']
             event_depth = event['depth']
-            
+
             for station in stations:
                 net_sta = f"{station['network']}.{station['station']}"
                 key = f"{event_id}-{net_sta}"
-                
+
                 # Calculate distance
                 distance_deg = locations2degrees(
                     event_lat, event_lon,
                     station['latitude'], station['longitude']
                 )
-                
+
                 # Get arrivals
                 try:
                     arrivals = taup.get_travel_times(
@@ -131,20 +126,136 @@ class WaveformDownloader:
                         distance_in_degree=distance_deg,
                         phase_list=phases
                     )
-                    
-                    phase_times = {}
+
+                    phase_times: Dict[str, float] = {}
                     for phase in phases:
                         matching_arrivals = [a for a in arrivals if a.name == phase]
                         if matching_arrivals:
-                            phase_times[phase] = matching_arrivals[0].time
-                    
+                            phase_times[phase] = float(matching_arrivals[0].time)
+
                     if phase_times:
                         arrivals_dict[key] = phase_times
-                        
+
                 except Exception as e:
                     self.logger.warning(f"Could not compute arrivals for {key}: {e}")
-        
+
         return arrivals_dict
+
+    def compute_arrival_details(
+        self,
+        events: List[dict],
+        stations: List[dict],
+        phases: List[str] = None,
+        model: str = 'iasp91'
+    ) -> Dict[str, Dict[str, Any]]:
+        """Compute rich TauP-based arrival metadata for event-station pairs.
+
+        Returns a mapping keyed by "<event_id>-<NET.STA>" with values of the
+        form::
+
+            {
+              "event_id": str,
+              "network": str,
+              "station": str,
+              "distance_deg": float,
+              "distance_km": float,
+              "phases": {
+                  "P": {
+                      "time_s": float,
+                      "takeoff_angle_deg": float | None,
+                      "ray_param_sec_deg": float | None,
+                  },
+                  ...
+              }
+            }
+
+        This is intended for downstream source-parameter analysis and JSON
+        export, without affecting the existing download behavior which only
+        needs arrival times.
+        """
+        if phases is None:
+            phases = ['P', 'S']
+
+        details: Dict[str, Dict[str, Any]] = {}
+        taup = self._ensure_taup_model(model)
+
+        from obspy.geodetics import locations2degrees, gps2dist_azimuth
+
+        for event in events:
+            event_id = event['event_id']
+            event_lat = event['latitude']
+            event_lon = event['longitude']
+            event_depth = event['depth']
+
+            for station in stations:
+                net = station['network']
+                sta = station['station']
+                net_sta = f"{net}.{sta}"
+                key = f"{event_id}-{net_sta}"
+
+                try:
+                    distance_deg = locations2degrees(
+                        event_lat, event_lon,
+                        station['latitude'], station['longitude']
+                    )
+                    dist_m, _, _ = gps2dist_azimuth(
+                        event_lat, event_lon,
+                        station['latitude'], station['longitude']
+                    )
+                    distance_km = float(dist_m) / 1000.0
+                except Exception as e:
+                    self.logger.warning(f"Could not compute distance for {key}: {e}")
+                    continue
+
+                try:
+                    arrivals = taup.get_travel_times(
+                        source_depth_in_km=event_depth,
+                        distance_in_degree=distance_deg,
+                        phase_list=phases
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Could not compute arrivals for {key}: {e}")
+                    continue
+
+                phase_info: Dict[str, Dict[str, Any]] = {}
+                for phase in phases:
+                    matching_arrivals = [a for a in arrivals if a.name == phase]
+                    if not matching_arrivals:
+                        continue
+                    arr = matching_arrivals[0]
+                    info: Dict[str, Any] = {}
+                    try:
+                        info['time_s'] = float(arr.time)
+                    except Exception:
+                        continue
+                    # Optional fields; presence depends on TauP version/model
+                    takeoff = getattr(arr, 'takeoff_angle', None)
+                    if takeoff is not None:
+                        try:
+                            info['takeoff_angle_deg'] = float(takeoff)
+                        except Exception:
+                            pass
+                    rp = getattr(arr, 'ray_param_sec_degree', None)
+                    if rp is not None:
+                        try:
+                            info['ray_param_sec_deg'] = float(rp)
+                        except Exception:
+                            pass
+                    phase_info[phase] = info
+
+                if not phase_info:
+                    continue
+
+                details[key] = {
+                    'event_id': event_id,
+                    'network': net,
+                    'station': sta,
+                    'distance_deg': float(distance_deg),
+                    'distance_km': distance_km,
+                    'phases': phase_info,
+                }
+
+        return details
     
     def download_waveforms(
         self,

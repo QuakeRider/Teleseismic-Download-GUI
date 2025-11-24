@@ -663,16 +663,19 @@ class MainWindow(QMainWindow):
         self.data_manager.set_events(self.events)
         self.data_manager.save_checkpoint("events")
 
-        # Export CSV and JSON if project_dir is set
+        # Export CSV / JSON (and arrivals JSON if present) if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if proj:
                 events_dir = proj / 'data' / 'events'
                 events_csv = events_dir / 'events.csv'
                 events_json = events_dir / 'events.json'
+                arrivals_json = events_dir / 'arrivals.json'
                 self.data_manager.export_events_csv(str(events_csv))
                 self.data_manager.export_events_json(str(events_json))
-                self.logger.info("Saved events CSV and JSON.")
+                if self.data_manager.get_arrivals():
+                    self.data_manager.export_arrivals_json(str(arrivals_json))
+                self.logger.info("Saved events CSV/JSON (and arrivals JSON if available).")
         except Exception as e:
             self.logger.warning(f"Could not export events CSV/JSON: {e}")
 
@@ -769,7 +772,7 @@ class MainWindow(QMainWindow):
         self.data_manager.set_stations(self.stations)
         self.data_manager.save_checkpoint("stations")
 
-        # Export CSV and StationXML if project_dir is set
+        # Export CSV / JSON and StationXML if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if not proj:
@@ -777,7 +780,9 @@ class MainWindow(QMainWindow):
                 return
 
             stations_csv = proj / 'data' / 'stations' / 'stations.csv'
+            stations_json = proj / 'data' / 'stations' / 'stations.json'
             self.data_manager.export_stations_csv(str(stations_csv))
+            self.data_manager.export_stations_json(str(stations_json))
             sx_dir = proj / 'data' / 'stationxml'
 
             # Save StationXML in a background worker, constrained to event-mode time window and channels
@@ -981,8 +986,10 @@ class MainWindow(QMainWindow):
                 return
 
             stations_csv = proj / 'data' / 'stations' / 'stations.csv'
+            stations_json = proj / 'data' / 'stations' / 'stations.json'
             self.data_manager.export_stations_csv(str(stations_csv))
-            # Save StationXML files in the background, constrained to station-tab time window and channels
+            self.data_manager.export_stations_json(str(stations_json))
+            sx_dir = proj / 'data' / 'stationxml'
             sx_dir = proj / 'data' / 'stationxml'
             start_time = self.sta_start_dt.dateTime().toString(Qt.ISODate)
             end_time = self.sta_end_dt.dateTime().toString(Qt.ISODate)
@@ -1170,16 +1177,20 @@ class MainWindow(QMainWindow):
     def _on_save_events(self):
         self.data_manager.set_events(self.events)
         self.data_manager.save_checkpoint("events")
-        # Export CSV and JSON if project_dir is set
+        # Export CSV / JSON (and arrivals JSON if present) if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if proj:
                 events_dir = proj / 'data' / 'events'
                 events_csv = events_dir / 'events.csv'
                 events_json = events_dir / 'events.json'
+                arrivals_json = events_dir / 'arrivals.json'
                 self.data_manager.export_events_csv(str(events_csv))
                 self.data_manager.export_events_json(str(events_json))
-                self.logger.info("Saved events CSV and JSON.")
+                # Export arrivals if we have any stored
+                if self.data_manager.get_arrivals():
+                    self.data_manager.export_arrivals_json(str(arrivals_json))
+                self.logger.info("Saved events CSV/JSON (and arrivals JSON if available).")
         except Exception as e:
             self.logger.warning(f"Could not export events CSV/JSON: {e}")
         QMessageBox.information(self, "Saved", f"Saved {len(self.events)} events to project (CSV + JSON).")
@@ -1323,7 +1334,24 @@ class MainWindow(QMainWindow):
         self.logger.info(f"Computing theoretical arrivals ({','.join(phases)})...")
 
         def on_finished(result):
+            # Basic arrival times (seconds) for download windows
             self.theoretical_arrivals = result or {}
+
+            # Also compute richer arrival details for downstream analysis and
+            # store them via the DataManager so they can be exported.
+            try:
+                details = self.waveform_downloader.compute_arrival_details(
+                    self.events,
+                    self.stations,
+                    phases=phases,
+                    model=model,
+                )
+                self.data_manager.set_arrivals(details)
+                self.logger.info(f"Computed detailed arrivals for {len(details)} event-station pairs.")
+            except Exception as e:
+                # Do not fail the GUI workflow if extra metadata cannot be computed.
+                self.logger.warning(f"Could not compute detailed arrivals: {e}")
+
             QMessageBox.information(self, "Arrivals", f"Computed arrivals for {len(self.theoretical_arrivals)} pairs.")
 
         def on_error(msg):
