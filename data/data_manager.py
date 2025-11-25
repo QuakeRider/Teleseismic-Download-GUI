@@ -5,7 +5,6 @@ This module provides a lightweight state manager for event selection,
 station selection, and waveform downloading without RF processing dependencies.
 """
 
-import pickle
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -215,67 +214,7 @@ class DataManager:
         except Exception as e:
             print(f"Failed to load project: {e}")
             return False
-    
-    def save_checkpoint(self, name: str = "auto") -> bool:
-        """
-        Save current state to checkpoint file.
-        
-        Args:
-            name: Checkpoint name
-            
-        Returns:
-            True if successful
-        """
-        if not self.project_dir:
-            return False
-        
-        try:
-            checkpoint_dir = self.project_dir / 'checkpoints'
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            checkpoint_file = checkpoint_dir / f"checkpoint_{name}_{timestamp}.pkl"
-            
-            with open(checkpoint_file, 'wb') as f:
-                pickle.dump(self.state, f)
-            
-            return True
-        except Exception as e:
-            print(f"Failed to save checkpoint: {e}")
-            return False
-    
-    def load_checkpoint(self, checkpoint_file: str) -> bool:
-        """
-        Load state from checkpoint file.
-        
-        Args:
-            checkpoint_file: Path to checkpoint file
-            
-        Returns:
-            True if successful
-        """
-        try:
-            with open(checkpoint_file, 'rb') as f:
-                self.state = pickle.load(f)
-            return True
-        except Exception as e:
-            print(f"Failed to load checkpoint: {e}")
-            return False
-    
-    def list_checkpoints(self) -> List[Path]:
-        """
-        List available checkpoint files.
-        
-        Returns:
-            List of checkpoint file paths
-        """
-        if not self.project_dir:
-            return []
-        
-        checkpoint_dir = self.project_dir / 'checkpoints'
-        if not checkpoint_dir.exists():
-            return []
-        
-        return sorted(checkpoint_dir.glob('checkpoint_*.pkl'), reverse=True)
-    
+
     def set_stations(self, stations: List[Dict]):
         """Store station list."""
         self.state['stations'] = stations

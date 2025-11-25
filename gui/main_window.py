@@ -902,7 +902,6 @@ class MainWindow(QMainWindow):
             return
 
         self.data_manager.set_events(self.events)
-        self.data_manager.save_checkpoint("events")
 
         # Export CSV / JSON (and arrivals JSON if present) if project_dir is set
         try:
@@ -1011,13 +1010,12 @@ class MainWindow(QMainWindow):
             return
 
         self.data_manager.set_stations(self.stations)
-        self.data_manager.save_checkpoint("stations")
 
         # Export CSV / JSON and StationXML if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if not proj:
-                QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (checkpoint only).")
+                QMessageBox.warning(self, "No Project", "No project directory set. Cannot save stations.")
                 return
 
             # Use simplified structure: files in project root
@@ -1219,12 +1217,11 @@ class MainWindow(QMainWindow):
 
     def _on_save_stations(self):
         self.data_manager.set_stations(self.stations)
-        self.data_manager.save_checkpoint("stations")
         # Export CSV and StationXML if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if not proj:
-                QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (checkpoint only).")
+                QMessageBox.warning(self, "No Project", "No project directory set. Cannot save stations.")
                 return
 
             # Use simplified structure: files in project root
@@ -1418,7 +1415,6 @@ class MainWindow(QMainWindow):
 
     def _on_save_events(self):
         self.data_manager.set_events(self.events)
-        self.data_manager.save_checkpoint("events")
         # Export CSV / JSON (and arrivals JSON if present) if project_dir is set
         try:
             proj = self.data_manager.project_dir
