@@ -51,29 +51,169 @@ class DataManager:
     
     def initialize_project(self, project_dir: str) -> bool:
         """
-        Initialize project directory structure.
-        
+        Initialize project directory structure with simplified layout.
+
+        New simplified structure:
+            project/
+            ├── events.csv, events.json, arrivals.json
+            ├── stations.csv, stations.json
+            ├── waveforms/
+            │   └── <event_id>/
+            │       └── *.sac or *.mseed
+            └── stationxml/
+                └── *.xml
+
         Args:
             project_dir: Path to project directory
-            
+
         Returns:
             True if successful
         """
         try:
             self.project_dir = Path(project_dir)
             self.project_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create subdirectories
+
+            # Create only the subdirectories needed for waveforms and stationxml
             (self.project_dir / 'waveforms').mkdir(parents=True, exist_ok=True)
-            (self.project_dir / 'stations').mkdir(parents=True, exist_ok=True)
-            (self.project_dir / 'events').mkdir(parents=True, exist_ok=True)
             (self.project_dir / 'stationxml').mkdir(parents=True, exist_ok=True)
-            (self.project_dir / 'output' / 'logs').mkdir(parents=True, exist_ok=True)
-            (self.project_dir / 'checkpoints').mkdir(parents=True, exist_ok=True)
-            
+
             return True
         except Exception as e:
             print(f"Failed to initialize project: {e}")
+            return False
+
+    def load_project(self, project_dir: str, mode: str = 'array') -> bool:
+        """
+        Load existing project by scanning for data files and restoring state.
+
+        Scans for:
+        - events.csv / events.json / arrivals.json
+        - stations.csv / stations.json
+        - Falls back to legacy data/* structure if files not found in root
+
+        Args:
+            project_dir: Path to project directory
+            mode: 'array' or 'event' mode (determines what to load)
+
+        Returns:
+            True if successful (even if some files are missing)
+        """
+        try:
+            self.project_dir = Path(project_dir)
+
+            if not self.project_dir.exists():
+                print(f"Project directory does not exist: {project_dir}")
+                return False
+
+            # Try to load events
+            events_loaded = False
+
+            # Check for events in root directory (new structure)
+            events_csv = self.project_dir / 'events.csv'
+            events_json = self.project_dir / 'events.json'
+            arrivals_json = self.project_dir / 'arrivals.json'
+
+            # Fall back to legacy data/events structure
+            if not events_csv.exists() and not events_json.exists():
+                events_csv = self.project_dir / 'data' / 'events' / 'events.csv'
+                events_json = self.project_dir / 'data' / 'events' / 'events.json'
+                arrivals_json = self.project_dir / 'data' / 'events' / 'arrivals.json'
+
+            # Load events from JSON if available (more complete), otherwise CSV
+            if events_json.exists():
+                try:
+                    with open(events_json, 'r', encoding='utf-8') as f:
+                        events = json.load(f)
+                        self.set_events(events)
+                        events_loaded = True
+                        print(f"Loaded {len(events)} events from {events_json}")
+                except Exception as e:
+                    print(f"Failed to load events from JSON: {e}")
+            elif events_csv.exists():
+                try:
+                    import csv
+                    events = []
+                    with open(events_csv, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            # Convert numeric fields
+                            for key in ['latitude', 'longitude', 'depth', 'magnitude', 'distance_deg']:
+                                if key in row and row[key]:
+                                    try:
+                                        row[key] = float(row[key])
+                                    except (ValueError, TypeError):
+                                        pass
+                            events.append(row)
+                    self.set_events(events)
+                    events_loaded = True
+                    print(f"Loaded {len(events)} events from {events_csv}")
+                except Exception as e:
+                    print(f"Failed to load events from CSV: {e}")
+
+            # Load arrivals if available
+            if arrivals_json.exists():
+                try:
+                    with open(arrivals_json, 'r', encoding='utf-8') as f:
+                        arrivals = json.load(f)
+                        self.set_arrivals(arrivals)
+                        print(f"Loaded arrivals data from {arrivals_json}")
+                except Exception as e:
+                    print(f"Failed to load arrivals: {e}")
+
+            # Try to load stations
+            stations_loaded = False
+
+            # Check for stations in root directory (new structure)
+            stations_csv = self.project_dir / 'stations.csv'
+            stations_json = self.project_dir / 'stations.json'
+
+            # Fall back to legacy data/stations structure
+            if not stations_csv.exists() and not stations_json.exists():
+                stations_csv = self.project_dir / 'data' / 'stations' / 'stations.csv'
+                stations_json = self.project_dir / 'data' / 'stations' / 'stations.json'
+
+            # Load stations from JSON if available (more complete), otherwise CSV
+            if stations_json.exists():
+                try:
+                    with open(stations_json, 'r', encoding='utf-8') as f:
+                        stations = json.load(f)
+                        self.set_stations(stations)
+                        stations_loaded = True
+                        print(f"Loaded {len(stations)} stations from {stations_json}")
+                except Exception as e:
+                    print(f"Failed to load stations from JSON: {e}")
+            elif stations_csv.exists():
+                try:
+                    import csv
+                    stations = []
+                    with open(stations_csv, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            # Convert numeric fields
+                            for key in ['latitude', 'longitude', 'elevation', 'distance_deg', 'azimuth', 'back_azimuth']:
+                                if key in row and row[key]:
+                                    try:
+                                        row[key] = float(row[key])
+                                    except (ValueError, TypeError):
+                                        pass
+                            # Parse channel_types comma-separated list
+                            if 'channel_types' in row and row['channel_types']:
+                                row['channel_types'] = row['channel_types'].split(',')
+                            stations.append(row)
+                    self.set_stations(stations)
+                    stations_loaded = True
+                    print(f"Loaded {len(stations)} stations from {stations_csv}")
+                except Exception as e:
+                    print(f"Failed to load stations from CSV: {e}")
+
+            if not events_loaded and not stations_loaded:
+                print(f"Warning: No project data found in {project_dir}")
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"Failed to load project: {e}")
             return False
     
     def save_checkpoint(self, name: str = "auto") -> bool:
