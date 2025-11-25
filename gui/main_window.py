@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QComboBox, QDateTimeEdit, QDoubleSpinBox,
     QSpinBox, QCheckBox, QFileDialog, QProgressBar, QTextEdit, QDockWidget,
     QTableWidget, QTableWidgetItem, QMessageBox, QDialog, QDialogButtonBox,
-    QRadioButton
+    QRadioButton, QListWidget, QListWidgetItem
 )
 
 from data.data_manager import DataManager
@@ -520,16 +520,18 @@ class MainWindow(QMainWindow):
         left = QWidget(); left_layout = QVBoxLayout(left)
         form = QFormLayout()
 
-        # Providers
-        providers_layout = QHBoxLayout()
-        self.ev_mode_provider_checks = []
-        for name in ["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETHZ", "NCEDC", "SCEDC", "USGS"]:
-            cb = QCheckBox(name)
+        # Providers (scrollable list with checkboxes)
+        self.ev_mode_provider_list = QListWidget()
+        self.ev_mode_provider_list.setMaximumHeight(120)
+        for name in ["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETHZ", "NCEDC", "SCEDC", "USGS", "BGR", "AUSPASS", "ICGC", "UIB-NORSAR", "IPGP", "LMU", "KOERI", "KNMI", "NOA", "GEONET", "ISC"]:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             if name == "IRIS":
-                cb.setChecked(True)
-            self.ev_mode_provider_checks.append(cb)
-            providers_layout.addWidget(cb)
-        form.addRow(QLabel("Providers:"), self._wrap(providers_layout))
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+            self.ev_mode_provider_list.addItem(item)
+        form.addRow(QLabel("Providers:"), self.ev_mode_provider_list)
 
         # Network/station filters
         self.ev_mode_network_input = QLineEdit("*")
@@ -927,7 +929,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Event Required", "Please select an event on the Event tab first (double-click a row).")
             return
 
-        providers = [cb.text() for cb in self.ev_mode_provider_checks if cb.isChecked()]
+        providers = [self.ev_mode_provider_list.item(i).text()
+                     for i in range(self.ev_mode_provider_list.count())
+                     if self.ev_mode_provider_list.item(i).checkState() == Qt.Checked]
         if not providers:
             QMessageBox.warning(self, "No Providers", "Please select at least one provider.")
             return
@@ -1069,16 +1073,18 @@ class MainWindow(QMainWindow):
         left = QWidget(); left_layout = QVBoxLayout(left)
         form = QFormLayout()
 
-        # Providers as checkboxes container
-        providers_layout = QHBoxLayout()
-        self.provider_checks = []
-        for name in ["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETHZ", "NCEDC", "SCEDC", "USGS"]:
-            cb = QCheckBox(name)
+        # Providers (scrollable list with checkboxes)
+        self.provider_list = QListWidget()
+        self.provider_list.setMaximumHeight(120)
+        for name in ["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETHZ", "NCEDC", "SCEDC", "USGS", "BGR", "AUSPASS", "ICGC", "UIB-NORSAR", "IPGP", "LMU", "KOERI", "KNMI", "NOA", "GEONET", "ISC"]:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             if name == "IRIS":
-                cb.setChecked(True)
-            self.provider_checks.append(cb)
-            providers_layout.addWidget(cb)
-        form.addRow(QLabel("Providers:"), self._wrap(providers_layout))
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+            self.provider_list.addItem(item)
+        form.addRow(QLabel("Providers:"), self.provider_list)
 
         self.network_input = QLineEdit("*")
         self.station_input = QLineEdit("*")
@@ -1163,7 +1169,9 @@ class MainWindow(QMainWindow):
         if not bbox:
             QMessageBox.warning(self, "Invalid ROI", "Could not extract bounding box from the ROI.")
             return
-        providers = [cb.text() for cb in self.provider_checks if cb.isChecked()]
+        providers = [self.provider_list.item(i).text()
+                     for i in range(self.provider_list.count())
+                     if self.provider_list.item(i).checkState() == Qt.Checked]
         if not providers:
             QMessageBox.warning(self, "No Providers", "Please select at least one provider.")
             return
@@ -1485,7 +1493,8 @@ class MainWindow(QMainWindow):
 
         self.location_code = QLineEdit("*")
         # Provider and auth
-        self.provider = QComboBox(); self.provider.addItems(["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETH", "NCEDC", "SCEDC", "USGS"]) 
+        self.provider = QComboBox(); self.provider.addItems(["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETH", "NCEDC", "SCEDC", "USGS", "BGR", "AUSPASS", "ICGC", "UIB-NORSAR", "IPGP", "LMU", "KOERI", "KNMI", "NOA", "GEONET", "ISC"])
+        self.provider.setToolTip("Fallback provider used only when a station doesn't have a provider assigned. Multi-provider downloads use each station's own provider.") 
         self.username = QLineEdit(""); self.username.setPlaceholderText("optional username")
         self.password = QLineEdit(""); self.password.setPlaceholderText("optional password"); self.password.setEchoMode(QLineEdit.Password)
         # Download behavior
@@ -1512,7 +1521,7 @@ class MainWindow(QMainWindow):
         form.addRow("Location code:", self.location_code)
         form.addRow("Phases:", self._wrap(phases_row))
         form.addRow("Velocity model:", self.vel_model)
-        form.addRow("Provider:", self.provider)
+        form.addRow("Provider (fallback):", self.provider)
         form.addRow("Username:", self.username)
         form.addRow("Password:", self.password)
         form.addRow(self.bulk_download)
