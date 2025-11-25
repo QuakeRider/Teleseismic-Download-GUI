@@ -604,25 +604,25 @@ class MapPane(QWidget):
     ):
         """
         Display center point and distance rings.
-        
+
         Args:
             center: (lat, lon) of center point
             distances_deg: List of distances in degrees for rings
         """
         self.current_center = center
         lat, lon = center
-        
+
         # Add center marker (styled)
         js_center = f"addCenterPoint({lat}, {lon});"
         self.web_view.page().runJavaScript(js_center)
-        
-        # Add distance rings (fallback circles for reliability)
+
+        # Add geodesic distance rings that properly wrap around the globe
         for dist_deg in distances_deg:
-            radius_m = dist_deg * 111000.0
-            js_ring = f"addRing({lat}, {lon}, {radius_m}, '#0000ff', '5, 5', '{dist_deg}°');"
+            js_ring = f"addGeodesicRing({lat}, {lon}, {dist_deg}, '#0000ff', '5, 5', '{dist_deg}°');"
             self.web_view.page().runJavaScript(js_ring)
-        
-        self.lbl_info.setText(f"Center: {lat:.3f}°N, {lon:.3f}°E with {len(distances_deg)} rings")
+
+        if self.add_draw_controls:
+            self.lbl_info.setText(f"Center: {lat:.3f}°N, {lon:.3f}°E with {len(distances_deg)} rings")
     
     def clear_markers(self, marker_type: str = 'all'):
         """
@@ -754,6 +754,53 @@ class MapPane(QWidget):
             var circle = L.circle([lat, lon], { radius: radius_m, fillColor: 'transparent', fillOpacity: 0, color: color || '#0000ff', weight: 2, dashArray: dashArray || '5, 5' }).addTo(MAP);
             if (label) { circle.bindPopup(label); }
             return circle;
+          };
+
+          window.addGeodesicRing = function(lat, lon, radius_deg, color, dashArray, label){
+            console.log('addGeodesicRing', lat, lon, radius_deg, color, label);
+            var R = 6371.0; // Earth radius in km
+            var dist_km = radius_deg * (Math.PI/180) * R;
+            var pts = [];
+            for (var b=0; b<360; b+=2) {
+              var br = b * Math.PI/180.0;
+              var lat1 = lat * Math.PI/180.0;
+              var lon1 = lon * Math.PI/180.0;
+              var dr = dist_km / R;
+              var lat2 = Math.asin(Math.sin(lat1)*Math.cos(dr) + Math.cos(lat1)*Math.sin(dr)*Math.cos(br));
+              var lon2 = lon1 + Math.atan2(Math.sin(br)*Math.sin(dr)*Math.cos(lat1), Math.cos(dr)-Math.sin(lat1)*Math.sin(lat2));
+              pts.push([lat2*180/Math.PI, lon2*180/Math.PI]);
+            }
+            pts.push(pts[0]);
+            var poly = L.polyline(pts, { color: color || '#0000ff', weight: 2, dashArray: dashArray || '5, 5', fillColor: 'transparent', fillOpacity: 0 }).addTo(MAP);
+            if (label) { poly.bindPopup(label); }
+            return poly;
+          };
+
+          window.setROIFromBounds = function(minLat, minLon, maxLat, maxLon){
+            console.log('setROIFromBounds', minLat, minLon, maxLat, maxLon);
+            try {
+              if (window.__drawnItems){ window.__drawnItems.clearLayers(); }
+              var bounds = L.latLngBounds([minLat, minLon], [maxLat, maxLon]);
+              var rect = L.rectangle(bounds, { color: '#2ca02c', weight: 1 });
+              if (window.__drawnItems){ window.__drawnItems.addLayer(rect); }
+              else { rect.addTo(MAP); }
+              var gj = rect.toGeoJSON();
+              window.lastGeoJSON = gj;
+            } catch (e) { console.error('setROIFromBounds error', e); }
+          };
+
+          window.setROICircle = function(lat, lon, radius_m){
+            console.log('setROICircle', lat, lon, radius_m);
+            try {
+              if (window.__drawnItems){ window.__drawnItems.clearLayers(); }
+              var circle = L.circle([lat, lon], { radius: radius_m, color: '#2ca02c', weight: 1 });
+              if (window.__drawnItems){ window.__drawnItems.addLayer(circle); }
+              else { circle.addTo(MAP); }
+              var gj = circle.toGeoJSON();
+              gj.properties = gj.properties || {};
+              gj.properties.radius = radius_m;
+              window.lastGeoJSON = gj;
+            } catch (e) { console.error('setROICircle error', e); }
           };
 
           // Wire draw handlers to set window.lastGeoJSON and notify Qt
