@@ -8,7 +8,7 @@ Three tabs:
 """
 
 import logging
-from pathlib import Path as PathType
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 from PyQt5.QtCore import Qt, QDateTime, QThread, pyqtSignal
