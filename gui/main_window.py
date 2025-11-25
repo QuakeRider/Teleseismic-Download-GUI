@@ -523,7 +523,7 @@ class MainWindow(QMainWindow):
         # Providers
         providers_layout = QHBoxLayout()
         self.ev_mode_provider_checks = []
-        for name in ["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETHZ", "NCEDC", "SCEDC", "USGS"]:
+        for name in ["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETHZ", "NCEDC", "SCEDC", "USGS", "BGR", "AUSPASS", "ICGC", "UIB-NORSAR", "IPGP", "LMU", "KOERI", "KNMI", "NOA", "GEONET", "ISC"]:
             cb = QCheckBox(name)
             if name == "IRIS":
                 cb.setChecked(True)
@@ -1072,7 +1072,7 @@ class MainWindow(QMainWindow):
         # Providers as checkboxes container
         providers_layout = QHBoxLayout()
         self.provider_checks = []
-        for name in ["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETHZ", "NCEDC", "SCEDC", "USGS"]:
+        for name in ["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETHZ", "NCEDC", "SCEDC", "USGS", "BGR", "AUSPASS", "ICGC", "UIB-NORSAR", "IPGP", "LMU", "KOERI", "KNMI", "NOA", "GEONET", "ISC"]:
             cb = QCheckBox(name)
             if name == "IRIS":
                 cb.setChecked(True)
@@ -1485,7 +1485,7 @@ class MainWindow(QMainWindow):
 
         self.location_code = QLineEdit("*")
         # Provider and auth
-        self.provider = QComboBox(); self.provider.addItems(["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETH", "NCEDC", "SCEDC", "USGS"]) 
+        self.provider = QComboBox(); self.provider.addItems(["IRIS", "GEOFON", "ORFEUS", "RESIF", "INGV", "ETH", "NCEDC", "SCEDC", "USGS", "BGR", "AUSPASS", "ICGC", "UIB-NORSAR", "IPGP", "LMU", "KOERI", "KNMI", "NOA", "GEONET", "ISC"]) 
         self.username = QLineEdit(""); self.username.setPlaceholderText("optional username")
         self.password = QLineEdit(""); self.password.setPlaceholderText("optional password"); self.password.setEchoMode(QLineEdit.Password)
         # Download behavior

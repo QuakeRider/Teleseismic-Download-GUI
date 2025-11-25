@@ -41,6 +41,17 @@ class StationService:
         "NCEDC": "NCEDC",
         "SCEDC": "SCEDC",
         "USGS": "USGS",
+        "BGR": "BGR",
+        "AUSPASS": "AUSPASS",
+        "ICGC": "ICGC",
+        "UIB-NORSAR": "UIB-NORSAR",
+        "IPGP": "IPGP",
+        "LMU": "LMU",
+        "KOERI": "KOERI",
+        "KNMI": "KNMI",
+        "NOA": "NOA",
+        "GEONET": "GEONET",
+        "ISC": "ISC",
     }
     
     def __init__(
