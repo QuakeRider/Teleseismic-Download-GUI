@@ -8,6 +8,7 @@ Three tabs:
 """
 
 import logging
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 from PyQt5.QtCore import Qt, QDateTime, QThread, pyqtSignal
@@ -53,6 +54,182 @@ class ModeSelectionDialog(QDialog):
     def selected_mode(self) -> str:
         """Return the selected mode string ('array' or 'event')."""
         return 'event' if self.event_radio.isChecked() else 'array'
+
+
+class ProjectSelectionDialog(QDialog):
+    """Startup dialog to create a new project or load an existing one."""
+
+    def __init__(self, mode: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Project Setup")
+        self.mode = mode
+        self._project_path = None
+        self._is_new_project = True
+
+        layout = QVBoxLayout(self)
+
+        # Instructions
+        instruction_text = f"Set up your project for {mode}-based analysis:"
+        label = QLabel(instruction_text)
+        layout.addWidget(label)
+
+        # Radio buttons for new vs existing project
+        self.new_project_radio = QRadioButton("Create New Project")
+        self.load_project_radio = QRadioButton("Load Existing Project")
+        self.new_project_radio.setChecked(True)
+
+        layout.addWidget(self.new_project_radio)
+        layout.addWidget(self.load_project_radio)
+
+        # Project directory selection
+        dir_layout = QHBoxLayout()
+        self.project_dir_input = QLineEdit("")
+        self.project_dir_input.setPlaceholderText("Select project directory...")
+        self.btn_browse = QPushButton("Browse...")
+        self.btn_browse.clicked.connect(self._on_browse)
+        dir_layout.addWidget(QLabel("Directory:"))
+        dir_layout.addWidget(self.project_dir_input)
+        dir_layout.addWidget(self.btn_browse)
+        layout.addLayout(dir_layout)
+
+        # Project name input (only for new projects)
+        name_layout = QHBoxLayout()
+        self.project_name_input = QLineEdit("")
+        self.project_name_input.setPlaceholderText("Optional: project folder name")
+        name_layout.addWidget(QLabel("Project Name:"))
+        name_layout.addWidget(self.project_name_input)
+        self.name_widget = QWidget()
+        self.name_widget.setLayout(name_layout)
+        layout.addWidget(self.name_widget)
+
+        # Help text
+        self.help_label = QLabel()
+        self.help_label.setWordWrap(True)
+        self._update_help_text()
+        layout.addWidget(self.help_label)
+
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        # Connect radio buttons to update UI
+        self.new_project_radio.toggled.connect(self._on_mode_changed)
+        self.load_project_radio.toggled.connect(self._on_mode_changed)
+
+        self._on_mode_changed()
+
+    def _on_mode_changed(self):
+        """Update UI based on whether creating new or loading existing project."""
+        is_new = self.new_project_radio.isChecked()
+        self.name_widget.setVisible(is_new)
+        self._update_help_text()
+
+    def _update_help_text(self):
+        """Update help text based on selection."""
+        if self.new_project_radio.isChecked():
+            help_text = (
+                "Create a new project: Select a parent directory and optionally provide a project name. "
+                "A new folder will be created with the simplified structure:\n"
+                "  • events.csv, events.json (event data)\n"
+                "  • stations.csv, stations.json (station data)\n"
+                "  • waveforms/ (downloaded waveform files)\n"
+                "  • stationxml/ (station response files)"
+            )
+        else:
+            help_text = (
+                "Load an existing project: Select a project directory that contains previously saved data. "
+                "The application will scan for events.csv, stations.csv, and other files to restore your session."
+            )
+        self.help_label.setText(help_text)
+
+    def _on_browse(self):
+        """Open directory picker."""
+        if self.new_project_radio.isChecked():
+            # For new project, select parent directory
+            path = QFileDialog.getExistingDirectory(self, "Select Parent Directory for New Project")
+        else:
+            # For existing project, select the project directory itself
+            path = QFileDialog.getExistingDirectory(self, "Select Existing Project Directory")
+
+        if path:
+            self.project_dir_input.setText(path)
+
+    def _on_accept(self):
+        """Validate and accept the dialog."""
+        base_path = self.project_dir_input.text().strip()
+
+        if not base_path:
+            QMessageBox.warning(self, "No Directory", "Please select a directory.")
+            return
+
+        from pathlib import Path
+
+        if self.new_project_radio.isChecked():
+            # Creating new project
+            project_name = self.project_name_input.text().strip()
+            if project_name:
+                # Create subdirectory with project name
+                self._project_path = Path(base_path) / project_name
+            else:
+                # Use the selected directory as-is
+                self._project_path = Path(base_path)
+
+            # Check if directory already exists and has project files
+            if self._project_path.exists():
+                # Check if it looks like an existing project
+                has_events = (self._project_path / "events.csv").exists() or (self._project_path / "data" / "events" / "events.csv").exists()
+                has_stations = (self._project_path / "stations.csv").exists() or (self._project_path / "data" / "stations" / "stations.csv").exists()
+
+                if has_events or has_stations:
+                    reply = QMessageBox.question(
+                        self,
+                        "Directory Exists",
+                        f"The directory '{self._project_path}' already contains project files. Do you want to use it as an existing project?",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        self._is_new_project = False
+                    else:
+                        return
+
+            self._is_new_project = True
+        else:
+            # Loading existing project
+            self._project_path = Path(base_path)
+
+            if not self._project_path.exists():
+                QMessageBox.warning(self, "Invalid Directory", "The selected directory does not exist.")
+                return
+
+            # Check if it looks like a project directory
+            has_events = (self._project_path / "events.csv").exists() or (self._project_path / "data" / "events" / "events.csv").exists()
+            has_stations = (self._project_path / "stations.csv").exists() or (self._project_path / "data" / "stations" / "stations.csv").exists()
+
+            if not has_events and not has_stations:
+                reply = QMessageBox.question(
+                    self,
+                    "No Project Files Found",
+                    f"The directory '{self._project_path}' doesn't appear to contain project files. Create a new project here?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    self._is_new_project = True
+                else:
+                    return
+
+            self._is_new_project = False
+
+        self.accept()
+
+    def get_project_path(self) -> Optional[Path]:
+        """Return the selected project path."""
+        return self._project_path
+
+    def is_new_project(self) -> bool:
+        """Return whether this is a new project."""
+        return self._is_new_project
 
 
 class WorkerThread(QThread):
@@ -118,9 +295,6 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        # Project tab is shared between modes
-        self.project_tab = self._build_project_tab()
-
         # Initialize mode-specific tabs
         if self.mode == 'event':
             self._init_event_mode_tabs()
@@ -133,7 +307,72 @@ class MainWindow(QMainWindow):
         self.progress_manager.task_failed.connect(self._on_task_failed)
 
         self._workers = []  # Keep references to worker threads
+
+        # Load project data if available and set default output directory
+        self._load_project_data()
+
         self.logger.info(f"GUI initialized in {self.mode} mode.")
+
+    def _load_project_data(self):
+        """Load project data from DataManager and populate UI."""
+        # Set default output directory to project root (for waveforms)
+        if self.data_manager.project_dir:
+            self.output_dir.setText(str(self.data_manager.project_dir))
+            self.logger.info(f"Project directory: {self.data_manager.project_dir}")
+
+        # Load events from DataManager if available
+        events = self.data_manager.get_events()
+        if events:
+            self.events = events
+            self.logger.info(f"Loaded {len(events)} events from project")
+
+            # Populate event tables based on mode
+            if self.mode == 'event':
+                # Event mode: populate the event mode event table
+                self._populate_ev_mode_event_table(events)
+                # If there's one event, select it automatically
+                if len(events) == 1:
+                    self.current_event = events[0]
+                    self.ev_mode_confirmed_index = 0
+                    # Check the first row
+                    if self.ev_mode_event_table.rowCount() > 0:
+                        item = self.ev_mode_event_table.item(0, 0)
+                        if item:
+                            item.setCheckState(Qt.Checked)
+            else:
+                # Array mode: populate the array mode event table
+                self._populate_event_table(events)
+
+        # Load stations from DataManager if available
+        stations = self.data_manager.get_stations()
+        if stations:
+            self.stations = stations
+            self.logger.info(f"Loaded {len(stations)} stations from project")
+
+            # Populate station tables based on mode
+            if self.mode == 'event':
+                self._populate_ev_mode_station_table(stations)
+            else:
+                self._populate_station_table(stations)
+
+        # Load arrivals if available
+        arrivals = self.data_manager.get_arrivals()
+        if arrivals:
+            self.theoretical_arrivals = arrivals
+            self.logger.info(f"Loaded arrival data for {len(arrivals)} event-station pairs")
+
+        # Enable save buttons if we have data
+        if events:
+            if self.mode == 'event':
+                self.btn_ev_mode_save_events.setEnabled(True)
+            else:
+                self.btn_save_events.setEnabled(True)
+
+        if stations:
+            if self.mode == 'event':
+                self.btn_ev_mode_save_stations.setEnabled(True)
+            else:
+                self.btn_save_stations.setEnabled(True)
 
     def _init_array_mode_tabs(self):
         """Initialize tabs for array-based (ROI-centered) workflow."""
@@ -156,7 +395,6 @@ class MainWindow(QMainWindow):
         self.ev_start_dt.dateTimeChanged.connect(self._disable_time_sync)
         self.ev_end_dt.dateTimeChanged.connect(self._disable_time_sync)
 
-        self.tabs.addTab(self.project_tab, "Project")
         self.tabs.addTab(self.station_tab, "Stations")
         self.tabs.addTab(self.event_tab, "Events")
         self.tabs.addTab(self.download_tab, "Download")
@@ -167,86 +405,9 @@ class MainWindow(QMainWindow):
         self.event_mode_station_tab = self._build_event_mode_station_tab()
         self.download_tab = self._build_download_tab()
 
-        self.tabs.addTab(self.project_tab, "Project")
         self.tabs.addTab(self.event_mode_event_tab, "Event")
         self.tabs.addTab(self.event_mode_station_tab, "Stations")
         self.tabs.addTab(self.download_tab, "Download")
-
-    # ------------------------
-    # Project Tab
-    # ------------------------
-    def _build_project_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        form = QFormLayout()
-
-        # Project directory picker
-        self.project_dir_input = QLineEdit("")
-        btn_browse_proj = QPushButton("Browse…")
-        def _browse_proj():
-            path = QFileDialog.getExistingDirectory(self, "Select Project Directory")
-            if path:
-                self.project_dir_input.setText(path)
-        btn_browse_proj.clicked.connect(_browse_proj)
-        row = QHBoxLayout(); row.addWidget(self.project_dir_input); row.addWidget(btn_browse_proj)
-        form.addRow(QLabel("Project directory:"), self._wrap(row))
-
-        # Initialize/apply button
-        self.btn_init_project = QPushButton("Initialize/Use Project")
-        self.chk_set_waveforms_output = QCheckBox("Set Download output to <project>/data")
-        self.chk_set_waveforms_output.setChecked(True)
-        btns = QHBoxLayout(); btns.addWidget(self.btn_init_project); btns.addWidget(self.chk_set_waveforms_output)
-        form.addRow(self._wrap(btns))
-
-        # Derived paths preview (labels)
-        self.lbl_paths_preview = QLabel("")
-        form.addRow(QLabel("Paths preview:"), self.lbl_paths_preview)
-
-        layout.addLayout(form)
-
-        def _update_preview(path: str):
-            if not path:
-                self.lbl_paths_preview.setText("")
-                return
-            from pathlib import Path
-            p = Path(path)
-            preview = f"\nStations CSV: {p / 'data' / 'stations' / 'stations.csv'}\n" \
-                      f"Events CSV:   {p / 'data' / 'events' / 'events.csv'}\n" \
-                      f"StationXML:   {p / 'data' / 'stationxml'}\n" \
-                      f"Waveforms:    {p / 'data' / 'waveforms'}"
-            self.lbl_paths_preview.setText(preview)
-
-        self.project_dir_input.textChanged.connect(lambda _: _update_preview(self.project_dir_input.text().strip()))
-        _update_preview("")
-
-        def _init_project():
-            path = self.project_dir_input.text().strip()
-            if not path:
-                QMessageBox.warning(self, "Project", "Please select a project directory.")
-                return
-            ok = self.data_manager.initialize_project(path)
-            if ok:
-                # Set logs path for GUI logger
-                try:
-                    log_file = str((self.data_manager.project_dir / 'output' / 'logs' / 'session.log'))
-                    # Recreate logger to include file (optional)
-                    # self.logger = setup_logger('downloader_gui', log_widget=self.log_text, log_file=log_file, level=self.logger.level)
-                    self.logger.info(f"Using project directory: {self.data_manager.project_dir}")
-                except Exception:
-                    pass
-                if self.chk_set_waveforms_output.isChecked():
-                    try:
-                        default_wave_dir = str(self.data_manager.project_dir / 'data')
-                        self.output_dir.setText(default_wave_dir)
-                    except Exception:
-                        pass
-                QMessageBox.information(self, "Project", "Project directory set.")
-                _update_preview(path)
-            else:
-                QMessageBox.critical(self, "Project", "Failed to initialize project directory.")
-        self.btn_init_project.clicked.connect(_init_project)
-
-        return w
 
     # ------------------------
     # Event-based Mode Tabs
@@ -741,16 +902,15 @@ class MainWindow(QMainWindow):
             return
 
         self.data_manager.set_events(self.events)
-        self.data_manager.save_checkpoint("events")
 
         # Export CSV / JSON (and arrivals JSON if present) if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if proj:
-                events_dir = proj / 'data' / 'events'
-                events_csv = events_dir / 'events.csv'
-                events_json = events_dir / 'events.json'
-                arrivals_json = events_dir / 'arrivals.json'
+                # Use simplified structure: files in project root
+                events_csv = proj / 'events.csv'
+                events_json = proj / 'events.json'
+                arrivals_json = proj / 'arrivals.json'
                 self.data_manager.export_events_csv(str(events_csv))
                 self.data_manager.export_events_json(str(events_json))
                 if self.data_manager.get_arrivals():
@@ -850,20 +1010,20 @@ class MainWindow(QMainWindow):
             return
 
         self.data_manager.set_stations(self.stations)
-        self.data_manager.save_checkpoint("stations")
 
         # Export CSV / JSON and StationXML if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if not proj:
-                QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (checkpoint only).")
+                QMessageBox.warning(self, "No Project", "No project directory set. Cannot save stations.")
                 return
 
-            stations_csv = proj / 'data' / 'stations' / 'stations.csv'
-            stations_json = proj / 'data' / 'stations' / 'stations.json'
+            # Use simplified structure: files in project root
+            stations_csv = proj / 'stations.csv'
+            stations_json = proj / 'stations.json'
             self.data_manager.export_stations_csv(str(stations_csv))
             self.data_manager.export_stations_json(str(stations_json))
-            sx_dir = proj / 'data' / 'stationxml'
+            sx_dir = proj / 'stationxml'
 
             # Save StationXML in a background worker, constrained to event-mode time window and channels
             start_time = self.ev_mode_sta_start_dt.dateTime().toString(Qt.ISODate)
@@ -1057,20 +1217,19 @@ class MainWindow(QMainWindow):
 
     def _on_save_stations(self):
         self.data_manager.set_stations(self.stations)
-        self.data_manager.save_checkpoint("stations")
         # Export CSV and StationXML if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if not proj:
-                QMessageBox.information(self, "Saved", f"Saved {len(self.stations)} stations to project (checkpoint only).")
+                QMessageBox.warning(self, "No Project", "No project directory set. Cannot save stations.")
                 return
 
-            stations_csv = proj / 'data' / 'stations' / 'stations.csv'
-            stations_json = proj / 'data' / 'stations' / 'stations.json'
+            # Use simplified structure: files in project root
+            stations_csv = proj / 'stations.csv'
+            stations_json = proj / 'stations.json'
             self.data_manager.export_stations_csv(str(stations_csv))
             self.data_manager.export_stations_json(str(stations_json))
-            sx_dir = proj / 'data' / 'stationxml'
-            sx_dir = proj / 'data' / 'stationxml'
+            sx_dir = proj / 'stationxml'
             start_time = self.sta_start_dt.dateTime().toString(Qt.ISODate)
             end_time = self.sta_end_dt.dateTime().toString(Qt.ISODate)
             channels = self.channels_input.text().strip() or "BH?"
@@ -1256,15 +1415,14 @@ class MainWindow(QMainWindow):
 
     def _on_save_events(self):
         self.data_manager.set_events(self.events)
-        self.data_manager.save_checkpoint("events")
         # Export CSV / JSON (and arrivals JSON if present) if project_dir is set
         try:
             proj = self.data_manager.project_dir
             if proj:
-                events_dir = proj / 'data' / 'events'
-                events_csv = events_dir / 'events.csv'
-                events_json = events_dir / 'events.json'
-                arrivals_json = events_dir / 'arrivals.json'
+                # Use simplified structure: files in project root
+                events_csv = proj / 'events.csv'
+                events_json = proj / 'events.json'
+                arrivals_json = proj / 'arrivals.json'
                 self.data_manager.export_events_csv(str(events_csv))
                 self.data_manager.export_events_json(str(events_json))
                 # Export arrivals if we have any stored

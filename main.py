@@ -94,7 +94,7 @@ def main():
     app.setStyle('Fusion')
     
     # Import GUI components after QApplication is created
-    from gui.main_window import MainWindow, ModeSelectionDialog
+    from gui.main_window import MainWindow, ModeSelectionDialog, ProjectSelectionDialog
 
     # Prompt user to select mode at startup
     mode_dialog = ModeSelectionDialog()
@@ -102,6 +102,27 @@ def main():
         logger.info("Mode selection cancelled. Exiting.")
         return 0
     mode = mode_dialog.selected_mode()
+
+    # Prompt user to create or load project
+    project_dialog = ProjectSelectionDialog(mode=mode)
+    if project_dialog.exec_() != QDialog.Accepted:
+        logger.info("Project setup cancelled. Exiting.")
+        return 0
+
+    project_path = project_dialog.get_project_path()
+    is_new_project = project_dialog.is_new_project()
+
+    if is_new_project:
+        # Initialize new project
+        logger.info(f"Creating new project at: {project_path}")
+        if not data_manager.initialize_project(str(project_path)):
+            logger.error("Failed to initialize project directory.")
+            return 1
+    else:
+        # Load existing project
+        logger.info(f"Loading existing project from: {project_path}")
+        if not data_manager.load_project(str(project_path), mode=mode):
+            logger.warning("Failed to load some project data. Continuing with empty state.")
 
     main_window = MainWindow(data_manager, logger, mode=mode)
     main_window.show()
