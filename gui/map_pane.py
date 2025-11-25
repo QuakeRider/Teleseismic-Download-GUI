@@ -291,16 +291,24 @@ class MapPane(QWidget):
               };
 
               window.addStationTriangle = function(lat, lon, color, label) {
-                // Approximate small triangle around point
-                var d = 0.05; // degrees ~ 5-6 km; simplistic
-                var coslat = Math.cos(lat*Math.PI/180.0);
-                var dx = d * Math.max(coslat, 0.2);
-                var p1 = [lat + d, lon];
-                var p2 = [lat - d, lon - dx];
-                var p3 = [lat - d, lon + dx];
-                var tri = L.polygon([p1, p2, p3], {color: '#000', weight: 1, fillColor: color || '#1f77b4', fillOpacity: 0.9});
-                if (label) { tri.bindPopup(label); }
-                return tri.addTo(__MAP__);
+                // Create equilateral triangle marker that scales with zoom
+                var size = 14; // pixels
+                var fillColor = color || '#1f77b4';
+                // Equilateral triangle pointing up: height = sqrt(3)/2 * base
+                var svg = '<svg width="' + size + '" height="' + size + '" viewBox="0 0 14 14">' +
+                          '<polygon points="7,2.3 1.5,12 12.5,12" ' +
+                          'style="fill:' + fillColor + ';stroke:#000;stroke-width:1;stroke-linejoin:miter"/>' +
+                          '</svg>';
+                var icon = L.divIcon({
+                  html: svg,
+                  className: 'station-triangle-icon',
+                  iconSize: [size, size],
+                  iconAnchor: [size/2, size/2],
+                  popupAnchor: [0, -size/2]
+                });
+                var marker = L.marker([lat, lon], {icon: icon});
+                if (label) { marker.bindPopup(label); }
+                return marker.addTo(__MAP__);
               };
 
               // Draw simple metric circle (fallback)
@@ -776,11 +784,24 @@ class MapPane(QWidget):
 
           window.addStationTriangle = function(lat, lon, color, label){
             console.log('addStationTriangle', lat, lon, color, label);
-            var d = 0.05; var coslat = Math.cos(lat*Math.PI/180.0); var dx = d * Math.max(coslat, 0.2);
-            var p1 = [lat + d, lon]; var p2 = [lat - d, lon - dx]; var p3 = [lat - d, lon + dx];
-            var tri = L.polygon([p1, p2, p3], {color: '#000', weight: 1, fillColor: color || '#1f77b4', fillOpacity: 0.9});
-            if (label) { tri.bindPopup(label); }
-            return tri.addTo(MAP);
+            // Create equilateral triangle marker that scales with zoom
+            var size = 14; // pixels
+            var fillColor = color || '#1f77b4';
+            // Equilateral triangle pointing up: height = sqrt(3)/2 * base
+            var svg = '<svg width="' + size + '" height="' + size + '" viewBox="0 0 14 14">' +
+                      '<polygon points="7,2.3 1.5,12 12.5,12" ' +
+                      'style="fill:' + fillColor + ';stroke:#000;stroke-width:1;stroke-linejoin:miter"/>' +
+                      '</svg>';
+            var icon = L.divIcon({
+              html: svg,
+              className: 'station-triangle-icon',
+              iconSize: [size, size],
+              iconAnchor: [size/2, size/2],
+              popupAnchor: [0, -size/2]
+            });
+            var marker = L.marker([lat, lon], {icon: icon});
+            if (label) { marker.bindPopup(label); }
+            return marker.addTo(MAP);
           };
 
           window.addRing = function(lat, lon, radius_m, color, dashArray, label){
