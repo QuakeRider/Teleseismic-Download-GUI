@@ -193,6 +193,9 @@ class MapPane(QWidget):
         <script>
         (function(){
           var qtBridge = null;
+          var drawnItems = null;
+          var mapReady = false;
+
           function initQWebChannel() {
             try {
               var qobj = (typeof qt !== 'undefined') ? qt : (window.qt || null);
@@ -210,139 +213,170 @@ class MapPane(QWidget):
               return true;
             } catch (e) { console.error('QWebChannel init error:', e); return false; }
           }
+
+          function initMapHandlers() {
+            try {
+              // Check if map variable exists and is initialized
+              if (typeof __MAP__ === 'undefined' || !__MAP__ || typeof __MAP__.addLayer !== 'function') {
+                console.warn('Map not ready yet, retrying...');
+                return false;
+              }
+
+              console.log('Map ready, initializing handlers');
+              drawnItems = new L.FeatureGroup();
+              __MAP__.addLayer(drawnItems);
+              mapReady = true;
+
+              __MAP__.on('draw:created', function(e) {
+                var layer = e.layer;
+                drawnItems.clearLayers();
+                drawnItems.addLayer(layer);
+                var geojson = layer.toGeoJSON();
+                window.lastGeoJSON = geojson;
+                if (e.layerType === 'circle') {
+                  geojson.properties = geojson.properties || {};
+                  geojson.properties.radius = layer.getRadius();
+                  window.lastGeoJSON.properties = window.lastGeoJSON.properties || {};
+                  window.lastGeoJSON.properties.radius = layer.getRadius();
+                }
+                if (qtBridge) { try { qtBridge.onShapeDrawn(JSON.stringify(geojson)); } catch (err) { console.warn('onShapeDrawn failed', err); } }
+              });
+
+              __MAP__.on('draw:edited', function(e) {
+                var layers = e.layers;
+                layers.eachLayer(function(layer) {
+                  var geojson = layer.toGeoJSON();
+                  window.lastGeoJSON = geojson;
+                  if (layer instanceof L.Circle) {
+                    geojson.properties = geojson.properties || {};
+                    geojson.properties.radius = layer.getRadius();
+                    window.lastGeoJSON.properties = window.lastGeoJSON.properties || {};
+                    window.lastGeoJSON.properties.radius = layer.getRadius();
+                  }
+                  if (qtBridge) { try { qtBridge.onShapeEdited(JSON.stringify(geojson)); } catch (err) { console.warn('onShapeEdited failed', err); } }
+                });
+              });
+
+              __MAP__.on('draw:deleted', function(e) {
+                window.lastGeoJSON = null;
+                if (qtBridge) { try { qtBridge.onShapeDeleted(); } catch (err) { console.warn('onShapeDeleted failed', err); } }
+              });
+
+              window.clearAllLayers = function() {
+                drawnItems.clearLayers();
+                __MAP__.eachLayer(function(layer) {
+                  if (layer instanceof L.Marker || layer instanceof L.Circle) {
+                    if (layer !== drawnItems) { __MAP__.removeLayer(layer); }
+                  }
+                });
+              };
+
+              window.addMarker = function(lat, lon, icon, popup) {
+                var opts = {};
+                if (icon) { opts.icon = icon; }
+                var marker = L.marker([lat, lon], opts);
+                if (popup) { marker.bindPopup(popup); }
+                __MAP__.addLayer(marker);
+                return marker;
+              };
+
+              window.addCenterPoint = function(lat, lon) {
+                return L.circleMarker([lat, lon], {radius: 5, color: '#000', fillColor: '#000', fillOpacity: 1, weight: 1}).addTo(__MAP__);
+              };
+
+              window.addEventPoint = function(lat, lon, label) {
+                var m = L.circleMarker([lat, lon], {radius: 4, color: '#000', fillColor: '#d62728', fillOpacity: 0.9, weight: 1});
+                if (label) { m.bindPopup(label); }
+                return m.addTo(__MAP__);
+              };
+
+              window.addStationTriangle = function(lat, lon, color, label) {
+                // Approximate small triangle around point
+                var d = 0.05; // degrees ~ 5-6 km; simplistic
+                var coslat = Math.cos(lat*Math.PI/180.0);
+                var dx = d * Math.max(coslat, 0.2);
+                var p1 = [lat + d, lon];
+                var p2 = [lat - d, lon - dx];
+                var p3 = [lat - d, lon + dx];
+                var tri = L.polygon([p1, p2, p3], {color: '#000', weight: 1, fillColor: color || '#1f77b4', fillOpacity: 0.9});
+                if (label) { tri.bindPopup(label); }
+                return tri.addTo(__MAP__);
+              };
+
+              // Draw simple metric circle (fallback)
+              window.addRing = function(lat, lon, radius_m, color, dashArray, label) {
+                var circle = L.circle([lat, lon], { radius: radius_m, fillColor: 'transparent', fillOpacity: 0, color: color || '#0000ff', weight: 2, dashArray: dashArray || '5, 5' }).addTo(__MAP__);
+                if (label) { circle.bindPopup(label); }
+                return circle;
+              };
+
+              // Draw geodesic ring at a given angular distance (degrees) around a center
+              window.addGeodesicRing = function(lat, lon, radius_deg, color, dashArray, label) {
+                var R = 6371.0; // Earth radius in km
+                var dist_km = radius_deg * (Math.PI/180) * R; // convert degrees to arc length km
+                var pts = [];
+                for (var b=0; b<360; b+=2) { // 2-degree step for smoothness
+                  var br = b * Math.PI/180.0;
+                  var lat1 = lat * Math.PI/180.0;
+                  var lon1 = lon * Math.PI/180.0;
+                  var dr = dist_km / R;
+                  var lat2 = Math.asin(Math.sin(lat1)*Math.cos(dr) + Math.cos(lat1)*Math.sin(dr)*Math.cos(br));
+                  var lon2 = lon1 + Math.atan2(Math.sin(br)*Math.sin(dr)*Math.cos(lat1), Math.cos(dr)-Math.sin(lat1)*Math.sin(lat2));
+                  pts.push([lat2*180/Math.PI, lon2*180/Math.PI]);
+                }
+                // close the ring
+                pts.push(pts[0]);
+                var poly = L.polyline(pts, { color: color || '#0000ff', weight: 2, dashArray: dashArray || '5, 5' }).addTo(__MAP__);
+                if (label) { poly.bindPopup(label); }
+                return poly;
+              };
+
+              window.setROIFromBounds = function(minLat, minLon, maxLat, maxLon) {
+                try {
+                  drawnItems.clearLayers();
+                  var bounds = L.latLngBounds([minLat, minLon], [maxLat, maxLon]);
+                  var rect = L.rectangle(bounds, { color: '#2ca02c', weight: 1 });
+                  drawnItems.addLayer(rect);
+                  var gj = rect.toGeoJSON();
+                  window.lastGeoJSON = gj;
+                  if (qtBridge) { try { qtBridge.onShapeDrawn(JSON.stringify(gj)); } catch (e) { console.warn('ROI push failed', e); } }
+                } catch (e) { console.error('setROIFromBounds error', e); }
+              };
+
+              window.setROICircle = function(lat, lon, radius_m) {
+                try {
+                  drawnItems.clearLayers();
+                  var circle = L.circle([lat, lon], { radius: radius_m, color: '#2ca02c', weight: 1 });
+                  drawnItems.addLayer(circle);
+                  var gj = circle.toGeoJSON();
+                  gj.properties = gj.properties || {};
+                  gj.properties.radius = radius_m;
+                  window.lastGeoJSON = gj;
+                  if (qtBridge) { try { qtBridge.onShapeDrawn(JSON.stringify(gj)); } catch (e) { console.warn('ROI push failed', e); } }
+                } catch (e) { console.error('setROICircle error', e); }
+              };
+
+              return true;
+            } catch (e) {
+              console.error('Map init error:', e);
+              return false;
+            }
+          }
+
+          // Initialize both QWebChannel and map handlers with polling
           if (!initQWebChannel()) { setTimeout(initQWebChannel, 200); }
-
-          var drawnItems = new L.FeatureGroup();
-          __MAP__.addLayer(drawnItems);
-
-          __MAP__.on('draw:created', function(e) {
-            var layer = e.layer;
-            drawnItems.clearLayers();
-            drawnItems.addLayer(layer);
-            var geojson = layer.toGeoJSON();
-            window.lastGeoJSON = geojson;
-            if (e.layerType === 'circle') {
-              geojson.properties = geojson.properties || {};
-              geojson.properties.radius = layer.getRadius();
-              window.lastGeoJSON.properties = window.lastGeoJSON.properties || {};
-              window.lastGeoJSON.properties.radius = layer.getRadius();
-            }
-            if (qtBridge) { try { qtBridge.onShapeDrawn(JSON.stringify(geojson)); } catch (err) { console.warn('onShapeDrawn failed', err); } }
-          });
-
-          __MAP__.on('draw:edited', function(e) {
-            var layers = e.layers;
-            layers.eachLayer(function(layer) {
-              var geojson = layer.toGeoJSON();
-              window.lastGeoJSON = geojson;
-              if (layer instanceof L.Circle) {
-                geojson.properties = geojson.properties || {};
-                geojson.properties.radius = layer.getRadius();
-                window.lastGeoJSON.properties = window.lastGeoJSON.properties || {};
-                window.lastGeoJSON.properties.radius = layer.getRadius();
+          if (!initMapHandlers()) {
+            var retryCount = 0;
+            var maxRetries = 50; // 10 seconds max
+            var retryInterval = setInterval(function() {
+              if (initMapHandlers() || retryCount++ > maxRetries) {
+                clearInterval(retryInterval);
+                if (retryCount > maxRetries) {
+                  console.error('Failed to initialize map after 10 seconds');
+                }
               }
-              if (qtBridge) { try { qtBridge.onShapeEdited(JSON.stringify(geojson)); } catch (err) { console.warn('onShapeEdited failed', err); } }
-            });
-          });
-
-          __MAP__.on('draw:deleted', function(e) {
-            window.lastGeoJSON = null;
-            if (qtBridge) { try { qtBridge.onShapeDeleted(); } catch (err) { console.warn('onShapeDeleted failed', err); } }
-          });
-
-          window.clearAllLayers = function() {
-            drawnItems.clearLayers();
-            __MAP__.eachLayer(function(layer) {
-              if (layer instanceof L.Marker || layer instanceof L.Circle) {
-                if (layer !== drawnItems) { __MAP__.removeLayer(layer); }
-              }
-            });
-          };
-
-          window.addMarker = function(lat, lon, icon, popup) {
-            var opts = {};
-            if (icon) { opts.icon = icon; }
-            var marker = L.marker([lat, lon], opts);
-            if (popup) { marker.bindPopup(popup); }
-            __MAP__.addLayer(marker);
-            return marker;
-          };
-
-          window.addCenterPoint = function(lat, lon) {
-            return L.circleMarker([lat, lon], {radius: 5, color: '#000', fillColor: '#000', fillOpacity: 1, weight: 1}).addTo(__MAP__);
-          };
-
-          window.addEventPoint = function(lat, lon, label) {
-            var m = L.circleMarker([lat, lon], {radius: 4, color: '#000', fillColor: '#d62728', fillOpacity: 0.9, weight: 1});
-            if (label) { m.bindPopup(label); }
-            return m.addTo(__MAP__);
-          };
-
-          window.addStationTriangle = function(lat, lon, color, label) {
-            // Approximate small triangle around point
-            var d = 0.05; // degrees ~ 5-6 km; simplistic
-            var coslat = Math.cos(lat*Math.PI/180.0);
-            var dx = d * Math.max(coslat, 0.2);
-            var p1 = [lat + d, lon];
-            var p2 = [lat - d, lon - dx];
-            var p3 = [lat - d, lon + dx];
-            var tri = L.polygon([p1, p2, p3], {color: '#000', weight: 1, fillColor: color || '#1f77b4', fillOpacity: 0.9});
-            if (label) { tri.bindPopup(label); }
-            return tri.addTo(__MAP__);
-          };
-
-          // Draw simple metric circle (fallback)
-          window.addRing = function(lat, lon, radius_m, color, dashArray, label) {
-            var circle = L.circle([lat, lon], { radius: radius_m, fillColor: 'transparent', fillOpacity: 0, color: color || '#0000ff', weight: 2, dashArray: dashArray || '5, 5' }).addTo(__MAP__);
-            if (label) { circle.bindPopup(label); }
-            return circle;
-          };
-
-          // Draw geodesic ring at a given angular distance (degrees) around a center
-          window.addGeodesicRing = function(lat, lon, radius_deg, color, dashArray, label) {
-            var R = 6371.0; // Earth radius in km
-            var dist_km = radius_deg * (Math.PI/180) * R; // convert degrees to arc length km
-            var pts = [];
-            for (var b=0; b<360; b+=2) { // 2-degree step for smoothness
-              var br = b * Math.PI/180.0;
-              var lat1 = lat * Math.PI/180.0;
-              var lon1 = lon * Math.PI/180.0;
-              var dr = dist_km / R;
-              var lat2 = Math.asin(Math.sin(lat1)*Math.cos(dr) + Math.cos(lat1)*Math.sin(dr)*Math.cos(br));
-              var lon2 = lon1 + Math.atan2(Math.sin(br)*Math.sin(dr)*Math.cos(lat1), Math.cos(dr)-Math.sin(lat1)*Math.sin(lat2));
-              pts.push([lat2*180/Math.PI, lon2*180/Math.PI]);
-            }
-            // close the ring
-            pts.push(pts[0]);
-            var poly = L.polyline(pts, { color: color || '#0000ff', weight: 2, dashArray: dashArray || '5, 5' }).addTo(__MAP__);
-            if (label) { poly.bindPopup(label); }
-            return poly;
-          };
-
-          window.setROIFromBounds = function(minLat, minLon, maxLat, maxLon) {
-            try {
-              drawnItems.clearLayers();
-              var bounds = L.latLngBounds([minLat, minLon], [maxLat, maxLon]);
-              var rect = L.rectangle(bounds, { color: '#2ca02c', weight: 1 });
-              drawnItems.addLayer(rect);
-              var gj = rect.toGeoJSON();
-              window.lastGeoJSON = gj;
-              if (qtBridge) { try { qtBridge.onShapeDrawn(JSON.stringify(gj)); } catch (e) { console.warn('ROI push failed', e); } }
-            } catch (e) { console.error('setROIFromBounds error', e); }
-          };
-
-          window.setROICircle = function(lat, lon, radius_m) {
-            try {
-              drawnItems.clearLayers();
-              var circle = L.circle([lat, lon], { radius: radius_m, color: '#2ca02c', weight: 1 });
-              drawnItems.addLayer(circle);
-              var gj = circle.toGeoJSON();
-              gj.properties = gj.properties || {};
-              gj.properties.radius = radius_m;
-              window.lastGeoJSON = gj;
-              if (qtBridge) { try { qtBridge.onShapeDrawn(JSON.stringify(gj)); } catch (e) { console.warn('ROI push failed', e); } }
-            } catch (e) { console.error('setROICircle error', e); }
-          };
+            }, 200);
+          }
         })();
         </script>
         """
