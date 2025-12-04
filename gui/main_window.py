@@ -2281,35 +2281,48 @@ class MainWindow(QMainWindow):
 
     def _on_wf_plot(self):
         """Plot the selected waveforms."""
+        print("_on_wf_plot called", flush=True)
+
         if not HAS_OBSPY:
             QMessageBox.warning(self, "ObsPy Required", "ObsPy is required for waveform plotting.")
             return
 
         selected_files = self._get_selected_waveform_files()
+        print(f"Selected {len(selected_files)} files", flush=True)
         if not selected_files:
             QMessageBox.warning(self, "No Selection", "Please select waveforms to plot.")
             return
 
         # Initialize matplotlib canvas if needed
+        print("Calling _ensure_matplotlib_canvas...", flush=True)
         if not self._ensure_matplotlib_canvas():
             return
+        print("Canvas ensured, continuing...", flush=True)
 
+        print("Updating status label...", flush=True)
         self.logger.info(f"Plotting {len(selected_files)} waveform files...")
         self.wf_status_label.setText(f"Loading {len(selected_files)} waveforms...")
+        print("Disabling plot button...", flush=True)
         self.btn_wf_plot.setEnabled(False)
+        print("About to create worker thread...", flush=True)
 
         def load_and_plot():
+            print("Worker: load_and_plot started", flush=True)
             # Load all selected waveforms
             st = Stream()
             errors = []
-            for fpath in selected_files:
+            for i, fpath in enumerate(selected_files):
                 try:
                     st += read(fpath)
+                    if i % 10 == 0:
+                        print(f"Worker: loaded {i+1}/{len(selected_files)} files", flush=True)
                 except Exception as e:
                     errors.append(f"Could not read {fpath}: {e}")
+            print(f"Worker: finished loading, {len(st)} traces", flush=True)
             return st, errors
 
         def on_finished(result):
+            print("on_finished called", flush=True)
             self.btn_wf_plot.setEnabled(True)
 
             if result is None:
@@ -2318,6 +2331,7 @@ class MainWindow(QMainWindow):
                 return
 
             stream, errors = result
+            print(f"Got {len(stream)} traces, {len(errors)} errors", flush=True)
 
             # Log errors from worker thread in main thread
             for err in errors:
@@ -2328,16 +2342,22 @@ class MainWindow(QMainWindow):
                 self.wf_status_label.setText("No waveforms to display.")
                 return
 
+            print("Calling _plot_waveforms...", flush=True)
             self._plot_waveforms(stream)
+            print("Plot complete", flush=True)
             self.wf_status_label.setText(f"Plotted {len(stream)} traces.")
 
         def on_error(msg):
+            print(f"on_error called: {msg}", flush=True)
             self.btn_wf_plot.setEnabled(True)
             QMessageBox.critical(self, "Error", f"Failed to load waveforms: {msg}")
             self.wf_status_label.setText("Error loading waveforms.")
 
+        print("Creating WorkerThread...", flush=True)
         worker = WorkerThread(load_and_plot)
+        print("Calling _run_worker...", flush=True)
         self._run_worker(worker, on_finished, on_error)
+        print("_run_worker returned", flush=True)
 
     def _plot_waveforms(self, stream: 'Stream'):
         """Plot the loaded waveforms on the matplotlib canvas."""
