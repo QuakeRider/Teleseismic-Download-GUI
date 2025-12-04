@@ -1737,6 +1737,10 @@ class MainWindow(QMainWindow):
     # ------------------------
     def _build_waveform_tab(self) -> QWidget:
         """Build the waveform viewer tab for plotting downloaded seismic data."""
+        # Initialize internal state first to avoid attribute errors
+        self._wf_files: Dict[str, Dict] = {}  # path -> {stream, metadata}
+        self._wf_grouped: Dict[str, Dict] = {}  # event_id -> station -> channel_type -> files
+
         w = QWidget()
         main_layout = QHBoxLayout(w)
 
@@ -1877,10 +1881,6 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(splitter)
 
-        # Internal state
-        self._wf_files: Dict[str, Dict] = {}  # path -> {stream, metadata}
-        self._wf_grouped: Dict[str, Dict] = {}  # event_id -> station -> channel_type -> files
-
         return w
 
     def _on_wf_browse_dir(self):
@@ -1937,6 +1937,7 @@ class MainWindow(QMainWindow):
         def scan_files():
             files_info = {}
             grouped = {}
+            errors = []  # Collect errors to log in main thread
 
             for fpath in all_files:
                 try:
@@ -1985,9 +1986,9 @@ class MainWindow(QMainWindow):
                     grouped[event_id][sta][channel_type].append(str(fpath))
 
                 except Exception as e:
-                    self.logger.warning(f"Could not read {fpath}: {e}")
+                    errors.append(f"Could not read {fpath}: {e}")
 
-            return files_info, grouped
+            return files_info, grouped, errors
 
         def on_finished(result):
             self.btn_wf_scan.setEnabled(True)
@@ -1995,9 +1996,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", "Failed to scan waveform files.")
                 return
 
-            files_info, grouped = result
+            files_info, grouped, errors = result
             self._wf_files = files_info
             self._wf_grouped = grouped
+
+            # Log errors from worker thread in main thread
+            for err in errors:
+                self.logger.warning(err)
 
             self._populate_wf_tree()
             self.wf_status_label.setText(f"Loaded {len(files_info)} waveform files from {len(grouped)} event(s).")
@@ -2168,15 +2173,27 @@ class MainWindow(QMainWindow):
         def load_and_plot():
             # Load all selected waveforms
             st = Stream()
+            errors = []
             for fpath in selected_files:
                 try:
                     st += read(fpath)
                 except Exception as e:
-                    self.logger.warning(f"Could not read {fpath}: {e}")
-            return st
+                    errors.append(f"Could not read {fpath}: {e}")
+            return st, errors
 
-        def on_finished(stream):
+        def on_finished(result):
             self.btn_wf_plot.setEnabled(True)
+
+            if result is None:
+                QMessageBox.warning(self, "No Data", "Could not load any waveform data.")
+                self.wf_status_label.setText("No waveforms to display.")
+                return
+
+            stream, errors = result
+
+            # Log errors from worker thread in main thread
+            for err in errors:
+                self.logger.warning(err)
 
             if stream is None or len(stream) == 0:
                 QMessageBox.warning(self, "No Data", "Could not load any waveform data.")
