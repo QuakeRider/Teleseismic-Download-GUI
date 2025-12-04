@@ -23,19 +23,29 @@ from PyQt5.QtWidgets import (
 )
 
 # Matplotlib imports for waveform plotting
-import matplotlib
-matplotlib.use('Qt5Agg')
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
+HAS_MATPLOTLIB = False
+try:
+    import matplotlib
+    matplotlib.use('Qt5Agg')
+    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+    from matplotlib.figure import Figure
+    import matplotlib.pyplot as plt
+    HAS_MATPLOTLIB = True
+except Exception as e:
+    print(f"Warning: Could not import matplotlib: {e}")
+    FigureCanvas = None
+    NavigationToolbar = None
+    Figure = None
+    plt = None
 
 # ObsPy imports for waveform reading
+HAS_OBSPY = False
 try:
     from obspy import read, Stream, UTCDateTime
     HAS_OBSPY = True
 except ImportError:
-    HAS_OBSPY = False
+    pass
 
 from data.data_manager import DataManager
 from services.station_service import StationService
@@ -1737,12 +1747,22 @@ class MainWindow(QMainWindow):
     # ------------------------
     def _build_waveform_tab(self) -> QWidget:
         """Build the waveform viewer tab for plotting downloaded seismic data."""
+        self.logger.debug("Building waveform tab...")
+
         # Initialize internal state first to avoid attribute errors
         self._wf_files: Dict[str, Dict] = {}  # path -> {stream, metadata}
         self._wf_grouped: Dict[str, Dict] = {}  # event_id -> station -> channel_type -> files
 
         w = QWidget()
         main_layout = QHBoxLayout(w)
+
+        # Check if matplotlib is available
+        if not HAS_MATPLOTLIB:
+            error_label = QLabel("Matplotlib is required for waveform plotting.\nPlease install matplotlib: pip install matplotlib")
+            error_label.setAlignment(Qt.AlignCenter)
+            main_layout.addWidget(error_label)
+            self.logger.warning("Matplotlib not available - waveform plotting disabled")
+            return w
 
         # Left panel: controls and station tree
         left_panel = QWidget()
@@ -1860,13 +1880,22 @@ class MainWindow(QMainWindow):
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
 
-        # Create matplotlib figure and canvas
-        self.wf_figure = Figure(figsize=(10, 8), dpi=100)
-        self.wf_canvas = FigureCanvas(self.wf_figure)
-        self.wf_toolbar = NavigationToolbar(self.wf_canvas, right_panel)
+        # Create matplotlib figure and canvas with error handling
+        try:
+            self.wf_figure = Figure(figsize=(10, 8), dpi=100)
+            self.wf_canvas = FigureCanvas(self.wf_figure)
+            self.wf_toolbar = NavigationToolbar(self.wf_canvas, right_panel)
 
-        right_layout.addWidget(self.wf_toolbar)
-        right_layout.addWidget(self.wf_canvas, stretch=1)
+            right_layout.addWidget(self.wf_toolbar)
+            right_layout.addWidget(self.wf_canvas, stretch=1)
+        except Exception as e:
+            self.logger.error(f"Failed to create matplotlib canvas: {e}")
+            error_label = QLabel(f"Error creating plot canvas:\n{e}")
+            error_label.setAlignment(Qt.AlignCenter)
+            right_layout.addWidget(error_label)
+            self.wf_figure = None
+            self.wf_canvas = None
+            self.wf_toolbar = None
 
         # Status label
         self.wf_status_label = QLabel("No waveforms loaded. Select a directory and click 'Scan Directory'.")
@@ -2159,6 +2188,10 @@ class MainWindow(QMainWindow):
         """Plot the selected waveforms."""
         if not HAS_OBSPY:
             QMessageBox.warning(self, "ObsPy Required", "ObsPy is required for waveform plotting.")
+            return
+
+        if not HAS_MATPLOTLIB or self.wf_canvas is None:
+            QMessageBox.warning(self, "Matplotlib Required", "Matplotlib is required for waveform plotting.")
             return
 
         selected_files = self._get_selected_waveform_files()
