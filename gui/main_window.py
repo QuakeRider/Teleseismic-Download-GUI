@@ -36,27 +36,53 @@ def _init_matplotlib():
     """Lazily initialize matplotlib with Qt5Agg backend."""
     global _matplotlib_initialized, _matplotlib_available
     global _mpl_Figure, _mpl_FigureCanvas, _mpl_NavigationToolbar, _mpl_plt
+    import sys
 
     if _matplotlib_initialized:
         return _matplotlib_available
 
     _matplotlib_initialized = True
-    try:
-        import matplotlib
-        matplotlib.use('Qt5Agg')
-        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
-        from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
-        from matplotlib.figure import Figure
-        import matplotlib.pyplot as plt
+    print("Attempting to initialize matplotlib...", flush=True)
 
+    try:
+        # Import matplotlib and set backend BEFORE importing pyplot
+        import matplotlib
+        print(f"Matplotlib version: {matplotlib.__version__}", flush=True)
+
+        # Check if backend is already set
+        current_backend = matplotlib.get_backend()
+        print(f"Current backend: {current_backend}", flush=True)
+
+        # Only set backend if not already using a Qt backend
+        if 'Qt' not in current_backend:
+            print("Setting Qt5Agg backend...", flush=True)
+            matplotlib.use('Qt5Agg', force=True)
+            print("Backend set successfully", flush=True)
+
+        print("Importing Figure...", flush=True)
+        from matplotlib.figure import Figure
         _mpl_Figure = Figure
+
+        print("Importing FigureCanvasQTAgg...", flush=True)
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
         _mpl_FigureCanvas = FigureCanvasQTAgg
+
+        print("Importing NavigationToolbar2QT...", flush=True)
+        from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
         _mpl_NavigationToolbar = NavigationToolbar2QT
+
+        print("Importing pyplot...", flush=True)
+        import matplotlib.pyplot as plt
         _mpl_plt = plt
+
         _matplotlib_available = True
-        print("Matplotlib initialized successfully with Qt5Agg backend")
+        print("Matplotlib initialized successfully!", flush=True)
+
     except Exception as e:
-        print(f"Warning: Could not initialize matplotlib: {e}")
+        print(f"Warning: Could not initialize matplotlib: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.stdout.flush()
         _matplotlib_available = False
 
     return _matplotlib_available
@@ -2192,35 +2218,63 @@ class MainWindow(QMainWindow):
 
     def _ensure_matplotlib_canvas(self) -> bool:
         """Lazily create matplotlib canvas when first needed. Returns True if successful."""
+        import sys
+
+        print("_ensure_matplotlib_canvas called", flush=True)
+
         if self.wf_canvas is not None:
+            print("Canvas already exists", flush=True)
             return True
 
         # Try to initialize matplotlib
+        print("Calling _init_matplotlib()...", flush=True)
         if not _init_matplotlib():
             QMessageBox.warning(self, "Matplotlib Error",
                               "Could not initialize matplotlib.\nPlease ensure matplotlib is installed: pip install matplotlib")
             return False
 
+        print("Matplotlib init succeeded, creating widgets...", flush=True)
+
         try:
             # Remove placeholder
             if self.wf_plot_placeholder is not None:
+                print("Removing placeholder...", flush=True)
                 self.wf_right_layout.removeWidget(self.wf_plot_placeholder)
                 self.wf_plot_placeholder.deleteLater()
                 self.wf_plot_placeholder = None
+                print("Placeholder removed", flush=True)
 
-            # Create matplotlib widgets
+            # Create matplotlib widgets step by step
+            print("Creating Figure...", flush=True)
+            sys.stdout.flush()
             self.wf_figure = _mpl_Figure(figsize=(10, 8), dpi=100)
+            print("Figure created", flush=True)
+
+            print("Creating FigureCanvas...", flush=True)
+            sys.stdout.flush()
             self.wf_canvas = _mpl_FigureCanvas(self.wf_figure)
+            print("FigureCanvas created", flush=True)
+
+            print("Creating NavigationToolbar...", flush=True)
+            sys.stdout.flush()
             self.wf_toolbar = _mpl_NavigationToolbar(self.wf_canvas, self.wf_right_panel)
+            print("NavigationToolbar created", flush=True)
 
             # Insert before the status label
+            print("Adding toolbar to layout...", flush=True)
             self.wf_right_layout.insertWidget(0, self.wf_toolbar)
+            print("Adding canvas to layout...", flush=True)
             self.wf_right_layout.insertWidget(1, self.wf_canvas, stretch=1)
+            print("Widgets added to layout", flush=True)
 
             self.logger.info("Matplotlib canvas created successfully")
             return True
 
         except Exception as e:
+            print(f"Exception creating canvas: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            sys.stdout.flush()
             self.logger.error(f"Failed to create matplotlib canvas: {e}")
             QMessageBox.warning(self, "Error", f"Failed to create plot canvas:\n{e}")
             return False
