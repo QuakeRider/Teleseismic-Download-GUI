@@ -2409,11 +2409,15 @@ class MainWindow(QMainWindow):
 
     def _plot_stacked(self, stream: 'Stream'):
         """Plot waveforms in stacked/record section style."""
+        print("_plot_stacked: starting", flush=True)
         n_traces = len(stream)
         if n_traces == 0:
+            print("_plot_stacked: no traces, returning", flush=True)
             return
 
+        print("_plot_stacked: adding subplot", flush=True)
         ax = self.wf_figure.add_subplot(111)
+        print("_plot_stacked: subplot added", flush=True)
 
         # Group by station for better organization
         traces_by_station = {}
@@ -2422,6 +2426,8 @@ class MainWindow(QMainWindow):
             if sta_key not in traces_by_station:
                 traces_by_station[sta_key] = []
             traces_by_station[sta_key].append(tr)
+
+        print(f"_plot_stacked: grouped {len(traces_by_station)} stations", flush=True)
 
         y_offset = 0
         y_labels = []
@@ -2440,7 +2446,9 @@ class MainWindow(QMainWindow):
                 if self.wf_normalize.isChecked():
                     data = data / (abs(data).max() + 1e-10)
 
+                print(f"_plot_stacked: plotting {sta_key}", flush=True)
                 ax.plot(times, data + y_offset, 'k-', linewidth=0.5)
+                print(f"_plot_stacked: plotted {sta_key}", flush=True)
 
                 label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
                 y_labels.append(label)
@@ -2448,6 +2456,7 @@ class MainWindow(QMainWindow):
 
                 y_offset += 1.5  # Spacing between traces
 
+        print("_plot_stacked: setting labels", flush=True)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Station.Channel")
         ax.set_yticks(y_positions)
@@ -2458,8 +2467,11 @@ class MainWindow(QMainWindow):
             start_time = min(tr.stats.starttime for tr in stream)
             ax.set_title(f"Waveforms starting at {start_time}")
 
+        print("_plot_stacked: adding grid", flush=True)
         ax.grid(True, alpha=0.3)
+        print("_plot_stacked: calling tight_layout", flush=True)
         self.wf_figure.tight_layout()
+        print("_plot_stacked: done", flush=True)
 
     def _plot_overlay(self, stream: 'Stream'):
         """Plot all waveforms overlaid on the same axes."""
