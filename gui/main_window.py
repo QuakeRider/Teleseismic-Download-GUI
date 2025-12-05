@@ -2346,7 +2346,10 @@ class MainWindow(QMainWindow):
 
     def _plot_waveforms(self, stream: 'Stream'):
         """Plot the loaded waveforms on the matplotlib canvas."""
+        print("_plot_waveforms: starting", flush=True)
+
         # Apply processing if requested
+        print("_plot_waveforms: copying stream", flush=True)
         st = stream.copy()
 
         # Apply bandpass filter if enabled
@@ -2354,6 +2357,7 @@ class MainWindow(QMainWindow):
             try:
                 freq_min = self.wf_freq_min.value()
                 freq_max = self.wf_freq_max.value()
+                print(f"_plot_waveforms: applying filter {freq_min}-{freq_max} Hz", flush=True)
                 st.filter('bandpass', freqmin=freq_min, freqmax=freq_max, corners=4, zerophase=True)
                 self.logger.info(f"Applied bandpass filter: {freq_min}-{freq_max} Hz")
             except Exception as e:
@@ -2361,6 +2365,7 @@ class MainWindow(QMainWindow):
 
         # Sort traces
         sort_by = self.wf_sort_by.currentText()
+        print(f"_plot_waveforms: sorting by {sort_by}", flush=True)
         if sort_by == "Station Name":
             st.sort(['station'])
         elif sort_by == "Distance":
@@ -2376,22 +2381,31 @@ class MainWindow(QMainWindow):
 
         # Normalize if requested
         if self.wf_normalize.isChecked():
+            print("_plot_waveforms: normalizing", flush=True)
             for tr in st:
                 tr.normalize()
 
         # Clear figure
+        print("_plot_waveforms: clearing figure", flush=True)
         self.wf_figure.clear()
+        print("_plot_waveforms: figure cleared", flush=True)
 
         plot_style = self.wf_plot_style.currentText()
+        print(f"_plot_waveforms: plot style = {plot_style}", flush=True)
 
         if plot_style == "Stacked":
+            print("_plot_waveforms: calling _plot_stacked", flush=True)
             self._plot_stacked(st)
         elif plot_style == "Overlay":
+            print("_plot_waveforms: calling _plot_overlay", flush=True)
             self._plot_overlay(st)
         else:  # Individual
+            print("_plot_waveforms: calling _plot_individual", flush=True)
             self._plot_individual(st)
 
+        print("_plot_waveforms: calling canvas.draw()", flush=True)
         self.wf_canvas.draw()
+        print("_plot_waveforms: done", flush=True)
 
     def _plot_stacked(self, stream: 'Stream'):
         """Plot waveforms in stacked/record section style."""
