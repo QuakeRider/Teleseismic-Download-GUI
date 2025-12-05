@@ -2366,10 +2366,11 @@ class MainWindow(QMainWindow):
             from PyQt5.QtGui import QPixmap
             from io import BytesIO
 
-            # Save figure to a BytesIO buffer as PNG (bypasses canvas.draw)
-            print("_plot_waveforms: saving to BytesIO buffer", flush=True)
+            # Save figure to a BytesIO buffer as PNG
+            print("_plot_waveforms: calling savefig...", flush=True)
             buf = BytesIO()
-            self.wf_figure.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            # Avoid bbox_inches='tight' - can cause crashes on some systems
+            self.wf_figure.savefig(buf, format='png', dpi=80)
             print("_plot_waveforms: savefig complete", flush=True)
             buf.seek(0)
 
