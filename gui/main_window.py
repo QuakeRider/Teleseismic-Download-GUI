@@ -2293,26 +2293,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Selection", "Please select waveforms to plot.")
             return
 
-        # Initialize matplotlib canvas if needed
-        print("Calling _ensure_matplotlib_canvas...", flush=True)
-        if not self._ensure_matplotlib_canvas():
-            return
-        print("Canvas ensured, continuing...", flush=True)
-
-        # Process events to let the canvas fully initialize
-        from PyQt5.QtWidgets import QApplication
-        print("Processing Qt events...", flush=True)
-        QApplication.processEvents()
-        print("Events processed", flush=True)
-
-        print("Updating status label...", flush=True)
+        # Load waveforms FIRST, before creating matplotlib canvas
+        print("Loading waveforms first...", flush=True)
         self.wf_status_label.setText(f"Loading {len(selected_files)} waveforms...")
-        print("Disabling plot button...", flush=True)
         self.btn_wf_plot.setEnabled(False)
-        QApplication.processEvents()
 
-        # Load waveforms synchronously to avoid threading issues with matplotlib
-        print("Loading waveforms...", flush=True)
         st = Stream()
         errors = []
         for i, fpath in enumerate(selected_files):
@@ -2320,23 +2305,30 @@ class MainWindow(QMainWindow):
                 st += read(fpath)
                 if (i + 1) % 10 == 0:
                     print(f"Loaded {i+1}/{len(selected_files)} files", flush=True)
-                    self.wf_status_label.setText(f"Loading {i+1}/{len(selected_files)} waveforms...")
-                    QApplication.processEvents()
             except Exception as e:
                 errors.append(f"Could not read {fpath}: {e}")
                 print(f"Error: {e}", flush=True)
 
-        print(f"Loaded {len(st)} traces", flush=True)
-
-        # Log errors
-        for err in errors:
-            self.logger.warning(err)
+        print(f"Waveforms loaded: {len(st)} traces", flush=True)
 
         if len(st) == 0:
             QMessageBox.warning(self, "No Data", "Could not load any waveform data.")
             self.wf_status_label.setText("No waveforms to display.")
             self.btn_wf_plot.setEnabled(True)
+            for err in errors:
+                self.logger.warning(err)
             return
+
+        # NOW create matplotlib canvas (after data is loaded)
+        print("Calling _ensure_matplotlib_canvas...", flush=True)
+        if not self._ensure_matplotlib_canvas():
+            self.btn_wf_plot.setEnabled(True)
+            return
+        print("Canvas ensured, continuing...", flush=True)
+
+        # Log any errors from loading
+        for err in errors:
+            self.logger.warning(err)
 
         print("Calling _plot_waveforms...", flush=True)
         try:
