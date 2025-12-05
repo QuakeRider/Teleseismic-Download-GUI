@@ -2360,29 +2360,32 @@ class MainWindow(QMainWindow):
             print("_plot_waveforms: calling _plot_individual", flush=True)
             self._plot_individual(st)
 
-        # Render to Agg buffer and display as QPixmap in QLabel
+        # Render figure to PNG in memory and display as QPixmap
         print("_plot_waveforms: starting render", flush=True)
         try:
-            from PyQt5.QtGui import QImage, QPixmap
+            from PyQt5.QtGui import QPixmap
+            from io import BytesIO
 
-            # Draw to the Agg buffer (this is safe - no Qt interaction)
-            print("_plot_waveforms: calling agg_canvas.draw()", flush=True)
-            self.wf_agg_canvas.draw()
-            print("_plot_waveforms: agg_canvas.draw() complete", flush=True)
+            # Save figure to a BytesIO buffer as PNG (bypasses canvas.draw)
+            print("_plot_waveforms: saving to BytesIO buffer", flush=True)
+            buf = BytesIO()
+            self.wf_figure.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+            print("_plot_waveforms: savefig complete", flush=True)
+            buf.seek(0)
 
-            # Get the buffer as RGBA
-            buf = self.wf_agg_canvas.buffer_rgba()
-            w, h = self.wf_agg_canvas.get_width_height()
-
-            # Convert to QImage and QPixmap
-            qimg = QImage(buf, w, h, QImage.Format_RGBA8888)
-            pixmap = QPixmap.fromImage(qimg)
+            # Load the PNG into a QPixmap
+            print("_plot_waveforms: loading QPixmap", flush=True)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.getvalue())
+            print("_plot_waveforms: QPixmap loaded", flush=True)
 
             # Display in the QLabel
             self.wf_image_label.setPixmap(pixmap)
-            self.logger.info(f"Plot rendered: {w}x{h} pixels")
+            self.logger.info(f"Plot rendered: {pixmap.width()}x{pixmap.height()} pixels")
+            print("_plot_waveforms: done", flush=True)
 
         except Exception as e:
+            print(f"_plot_waveforms: render error: {e}", flush=True)
             self.logger.error(f"Render error: {e}")
             import traceback
             traceback.print_exc()
