@@ -2403,8 +2403,8 @@ class MainWindow(QMainWindow):
             print("_plot_waveforms: calling _plot_individual", flush=True)
             self._plot_individual(st)
 
-        print("_plot_waveforms: calling canvas.draw()", flush=True)
-        self.wf_canvas.draw()
+        print("_plot_waveforms: calling canvas.draw_idle()", flush=True)
+        self.wf_canvas.draw_idle()  # Use draw_idle instead of draw to avoid crash
         print("_plot_waveforms: done", flush=True)
 
     def _plot_stacked(self, stream: 'Stream'):
