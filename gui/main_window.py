@@ -2267,6 +2267,12 @@ class MainWindow(QMainWindow):
             self.wf_right_layout.insertWidget(1, self.wf_canvas, stretch=1)
             print("Widgets added to layout", flush=True)
 
+            # Ensure canvas is shown and realized before we use it
+            print("Showing canvas...", flush=True)
+            self.wf_canvas.show()
+            self.wf_toolbar.show()
+            print("Canvas shown", flush=True)
+
             self.logger.info("Matplotlib canvas created successfully")
             return True
 
