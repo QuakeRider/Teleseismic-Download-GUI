@@ -2361,11 +2361,14 @@ class MainWindow(QMainWindow):
             self._plot_individual(st)
 
         # Render to Agg buffer and display as QPixmap in QLabel
+        print("_plot_waveforms: starting render", flush=True)
         try:
             from PyQt5.QtGui import QImage, QPixmap
 
             # Draw to the Agg buffer (this is safe - no Qt interaction)
+            print("_plot_waveforms: calling agg_canvas.draw()", flush=True)
             self.wf_agg_canvas.draw()
+            print("_plot_waveforms: agg_canvas.draw() complete", flush=True)
 
             # Get the buffer as RGBA
             buf = self.wf_agg_canvas.buffer_rgba()
