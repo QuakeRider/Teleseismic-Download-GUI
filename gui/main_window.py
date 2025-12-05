@@ -2409,8 +2409,36 @@ class MainWindow(QMainWindow):
             print("_plot_waveforms: calling _plot_individual", flush=True)
             self._plot_individual(st)
 
-        print("_plot_waveforms: calling canvas.draw_idle()", flush=True)
-        self.wf_canvas.draw_idle()  # Use draw_idle instead of draw to avoid crash
+        # Render to buffer and update canvas
+        print("_plot_waveforms: rendering figure to buffer", flush=True)
+        try:
+            # Draw to the Agg buffer
+            self.wf_figure.canvas.draw()
+            print("_plot_waveforms: buffer drawn", flush=True)
+
+            # Get the buffer and convert to QImage
+            import numpy as np
+            from PyQt5.QtGui import QImage, QPixmap
+
+            buf = self.wf_figure.canvas.buffer_rgba()
+            w, h = self.wf_figure.canvas.get_width_height()
+            qimg = QImage(buf, w, h, QImage.Format_RGBA8888)
+            print(f"_plot_waveforms: created QImage {w}x{h}", flush=True)
+
+            # If we have a QLabel for display, use it
+            if hasattr(self, 'wf_image_label') and self.wf_image_label is not None:
+                pixmap = QPixmap.fromImage(qimg)
+                self.wf_image_label.setPixmap(pixmap)
+                print("_plot_waveforms: set pixmap on label", flush=True)
+            else:
+                # Just blit to canvas - this might still crash
+                self.wf_canvas.blit()
+                print("_plot_waveforms: blit complete", flush=True)
+        except Exception as e:
+            print(f"_plot_waveforms: render error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+
         print("_plot_waveforms: done", flush=True)
 
     def _plot_stacked(self, stream: 'Stream'):
