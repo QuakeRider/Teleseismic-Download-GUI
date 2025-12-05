@@ -22,67 +22,39 @@ from PyQt5.QtWidgets import (
     QSplitter, QGroupBox, QSlider, QScrollArea
 )
 
-# Matplotlib will be imported lazily to avoid backend conflicts with PyQt5
-# These will be set by _init_matplotlib() when needed
+# Matplotlib will be imported lazily using Agg backend (non-interactive)
+# to avoid Qt-matplotlib crashes
 _matplotlib_initialized = False
 _matplotlib_available = False
 _mpl_Figure = None
-_mpl_FigureCanvas = None
-_mpl_NavigationToolbar = None
-_mpl_plt = None
+_mpl_FigureCanvasAgg = None
 
 
 def _init_matplotlib():
-    """Lazily initialize matplotlib with Qt5Agg backend."""
+    """Lazily initialize matplotlib with Agg backend (non-interactive, memory-based)."""
     global _matplotlib_initialized, _matplotlib_available
-    global _mpl_Figure, _mpl_FigureCanvas, _mpl_NavigationToolbar, _mpl_plt
-    import sys
+    global _mpl_Figure, _mpl_FigureCanvasAgg
 
     if _matplotlib_initialized:
         return _matplotlib_available
 
     _matplotlib_initialized = True
-    print("Attempting to initialize matplotlib...", flush=True)
 
     try:
-        # Import matplotlib and set backend BEFORE importing pyplot
+        # Use Agg backend - renders to memory, no GUI
         import matplotlib
-        print(f"Matplotlib version: {matplotlib.__version__}", flush=True)
+        matplotlib.use('Agg')
 
-        # Check if backend is already set
-        current_backend = matplotlib.get_backend()
-        print(f"Current backend: {current_backend}", flush=True)
-
-        # Only set backend if not already using a Qt backend
-        if 'Qt' not in current_backend:
-            print("Setting Qt5Agg backend...", flush=True)
-            matplotlib.use('Qt5Agg', force=True)
-            print("Backend set successfully", flush=True)
-
-        print("Importing Figure...", flush=True)
         from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
         _mpl_Figure = Figure
-
-        print("Importing FigureCanvasQTAgg...", flush=True)
-        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
-        _mpl_FigureCanvas = FigureCanvasQTAgg
-
-        print("Importing NavigationToolbar2QT...", flush=True)
-        from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
-        _mpl_NavigationToolbar = NavigationToolbar2QT
-
-        print("Importing pyplot...", flush=True)
-        import matplotlib.pyplot as plt
-        _mpl_plt = plt
-
+        _mpl_FigureCanvasAgg = FigureCanvasAgg
         _matplotlib_available = True
-        print("Matplotlib initialized successfully!", flush=True)
 
     except Exception as e:
-        print(f"Warning: Could not initialize matplotlib: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        sys.stdout.flush()
+        import logging
+        logging.warning(f"Could not initialize matplotlib: {e}")
         _matplotlib_available = False
 
     return _matplotlib_available
@@ -2226,62 +2198,41 @@ class MainWindow(QMainWindow):
             print("Canvas already exists", flush=True)
             return True
 
-        # Try to initialize matplotlib
-        print("Calling _init_matplotlib()...", flush=True)
+        # Try to initialize matplotlib with Agg backend
         if not _init_matplotlib():
             QMessageBox.warning(self, "Matplotlib Error",
                               "Could not initialize matplotlib.\nPlease ensure matplotlib is installed: pip install matplotlib")
             return False
 
-        print("Matplotlib init succeeded, creating widgets...", flush=True)
-
         try:
             # Remove placeholder
             if self.wf_plot_placeholder is not None:
-                print("Removing placeholder...", flush=True)
                 self.wf_right_layout.removeWidget(self.wf_plot_placeholder)
                 self.wf_plot_placeholder.deleteLater()
                 self.wf_plot_placeholder = None
-                print("Placeholder removed", flush=True)
 
-            # Create matplotlib widgets step by step
-            print("Creating Figure...", flush=True)
-            sys.stdout.flush()
-            self.wf_figure = _mpl_Figure(figsize=(10, 8), dpi=100)
-            print("Figure created", flush=True)
+            # Create matplotlib figure with Agg canvas (renders to memory)
+            self.wf_figure = _mpl_Figure(figsize=(12, 8), dpi=100)
+            self.wf_agg_canvas = _mpl_FigureCanvasAgg(self.wf_figure)
 
-            print("Creating FigureCanvas...", flush=True)
-            sys.stdout.flush()
-            self.wf_canvas = _mpl_FigureCanvas(self.wf_figure)
-            print("FigureCanvas created", flush=True)
+            # Create a QLabel inside a QScrollArea to display the rendered image
+            self.wf_scroll = QScrollArea()
+            self.wf_scroll.setWidgetResizable(True)
+            self.wf_image_label = QLabel()
+            self.wf_image_label.setAlignment(Qt.AlignCenter)
+            self.wf_scroll.setWidget(self.wf_image_label)
 
-            print("Creating NavigationToolbar...", flush=True)
-            sys.stdout.flush()
-            self.wf_toolbar = _mpl_NavigationToolbar(self.wf_canvas, self.wf_right_panel)
-            print("NavigationToolbar created", flush=True)
+            # Insert the scroll area
+            self.wf_right_layout.insertWidget(0, self.wf_scroll, stretch=1)
 
-            # Insert before the status label
-            print("Adding toolbar to layout...", flush=True)
-            self.wf_right_layout.insertWidget(0, self.wf_toolbar)
-            print("Adding canvas to layout...", flush=True)
-            self.wf_right_layout.insertWidget(1, self.wf_canvas, stretch=1)
-            print("Widgets added to layout", flush=True)
+            # Set wf_canvas to a marker value so we know it's initialized
+            self.wf_canvas = "initialized"
 
-            # Ensure canvas is shown and realized before we use it
-            print("Showing canvas...", flush=True)
-            self.wf_canvas.show()
-            self.wf_toolbar.show()
-            print("Canvas shown", flush=True)
-
-            self.logger.info("Matplotlib canvas created successfully")
+            self.logger.info("Matplotlib (Agg backend) initialized successfully")
             return True
 
         except Exception as e:
-            print(f"Exception creating canvas: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            sys.stdout.flush()
-            self.logger.error(f"Failed to create matplotlib canvas: {e}")
+            self.logger.error(f"Failed to create matplotlib figure: {e}")
             QMessageBox.warning(self, "Error", f"Failed to create plot canvas:\n{e}")
             return False
 
@@ -2409,37 +2360,29 @@ class MainWindow(QMainWindow):
             print("_plot_waveforms: calling _plot_individual", flush=True)
             self._plot_individual(st)
 
-        # Render to buffer and update canvas
-        print("_plot_waveforms: rendering figure to buffer", flush=True)
+        # Render to Agg buffer and display as QPixmap in QLabel
         try:
-            # Draw to the Agg buffer
-            self.wf_figure.canvas.draw()
-            print("_plot_waveforms: buffer drawn", flush=True)
-
-            # Get the buffer and convert to QImage
-            import numpy as np
             from PyQt5.QtGui import QImage, QPixmap
 
-            buf = self.wf_figure.canvas.buffer_rgba()
-            w, h = self.wf_figure.canvas.get_width_height()
-            qimg = QImage(buf, w, h, QImage.Format_RGBA8888)
-            print(f"_plot_waveforms: created QImage {w}x{h}", flush=True)
+            # Draw to the Agg buffer (this is safe - no Qt interaction)
+            self.wf_agg_canvas.draw()
 
-            # If we have a QLabel for display, use it
-            if hasattr(self, 'wf_image_label') and self.wf_image_label is not None:
-                pixmap = QPixmap.fromImage(qimg)
-                self.wf_image_label.setPixmap(pixmap)
-                print("_plot_waveforms: set pixmap on label", flush=True)
-            else:
-                # Just blit to canvas - this might still crash
-                self.wf_canvas.blit()
-                print("_plot_waveforms: blit complete", flush=True)
+            # Get the buffer as RGBA
+            buf = self.wf_agg_canvas.buffer_rgba()
+            w, h = self.wf_agg_canvas.get_width_height()
+
+            # Convert to QImage and QPixmap
+            qimg = QImage(buf, w, h, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qimg)
+
+            # Display in the QLabel
+            self.wf_image_label.setPixmap(pixmap)
+            self.logger.info(f"Plot rendered: {w}x{h} pixels")
+
         except Exception as e:
-            print(f"_plot_waveforms: render error: {e}", flush=True)
+            self.logger.error(f"Render error: {e}")
             import traceback
             traceback.print_exc()
-
-        print("_plot_waveforms: done", flush=True)
 
     def _plot_stacked(self, stream: 'Stream'):
         """Plot waveforms in stacked/record section style."""
@@ -2510,7 +2453,9 @@ class MainWindow(QMainWindow):
         """Plot all waveforms overlaid on the same axes."""
         ax = self.wf_figure.add_subplot(111)
 
-        colors = _mpl_plt.cm.tab10.colors
+        # Define colors for different traces
+        import matplotlib.cm as cm
+        colors = cm.tab10.colors
         for i, tr in enumerate(stream):
             times = tr.times()
             data = tr.data
