@@ -2469,8 +2469,7 @@ class MainWindow(QMainWindow):
 
         print("_plot_stacked: adding grid", flush=True)
         ax.grid(True, alpha=0.3)
-        print("_plot_stacked: calling tight_layout", flush=True)
-        self.wf_figure.tight_layout()
+        # Note: tight_layout() removed - causes crash with Qt5Agg backend
         print("_plot_stacked: done", flush=True)
 
     def _plot_overlay(self, stream: 'Stream'):
@@ -2498,7 +2497,7 @@ class MainWindow(QMainWindow):
 
         ax.legend(loc='upper right', fontsize=7, ncol=2)
         ax.grid(True, alpha=0.3)
-        self.wf_figure.tight_layout()
+        # Note: tight_layout() removed - causes crash with Qt5Agg backend
 
     def _plot_individual(self, stream: 'Stream'):
         """Plot each trace in its own subplot."""
@@ -2531,7 +2530,7 @@ class MainWindow(QMainWindow):
             ax.tick_params(labelsize=7)
             ax.grid(True, alpha=0.3)
 
-        self.wf_figure.tight_layout()
+        # Note: tight_layout() removed - causes crash with Qt5Agg backend
 
     # ------------------------
     # Progress handlers
