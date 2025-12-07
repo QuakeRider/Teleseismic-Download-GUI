@@ -12,6 +12,7 @@ In both modes, you can:
 - **Station Selection**: Query multiple FDSN providers concurrently for seismic stations with rich metadata.
 - **Event Selection**: Search earthquake catalogs with distance-based filtering and optional dynamic magnitude-depth cutoffs.
 - **Waveform Download**: Download seismic waveforms (bulk or per-trace) with progress tracking, retry logic, and flexible channel selection.
+- **Waveform Visualization**: Browse and plot downloaded waveforms with interactive controls for filtering, sorting, and display styles.
 
 ## Features
 
@@ -43,6 +44,21 @@ In both modes, you can:
 - Optional gap detection and cleanup (merge, fill value, max gap)
 - Save to SAC or MSEED formats, organized by event
 
+### Waveform Visualization
+- Browse downloaded waveform files (MSEED/SAC) organized by event directory
+- Tree view with waveforms grouped by event, station, and channel type
+- Filter by channel type (BH, HH, EH, etc.) and component (Z, N, E)
+- Search by station name pattern
+- Three plot styles:
+  - **Stacked**: Record section view with traces offset vertically
+  - **Overlay**: All traces superimposed on same axes with legend
+  - **Individual**: Separate subplot for each trace with linked x-axes
+- Real-time signal processing options:
+  - Bandpass filtering with configurable frequency range
+  - Trace normalization for amplitude comparison
+  - Sorting by station name or epicentral distance
+- Interactive plots with zoom, pan, and cursor tracking (powered by PyQtGraph)
+
 ## Installation
 
 1. Clone or extract this directory
@@ -67,9 +83,9 @@ python main.py --project /path/to/project
 
 On startup, the application shows a **mode selection dialog**:
 - **Array-based mode (ROI / array analysis)**
-  - Tabs: `Stations | Events | Download`
+  - Tabs: `Stations | Events | Download | Waveforms`
 - **Event-based mode (single-event analysis)**
-  - Tabs: `Event | Stations | Download`
+  - Tabs: `Event | Stations | Download | Waveforms`
 
 You must choose a mode to continue. You can always restart the program to switch modes.
 
@@ -103,7 +119,16 @@ You must choose a mode to continue. You can always restart the program to switch
    - **Multi-provider downloads** automatically route requests to each station's preferred provider
    - When finished, optionally click **Save to Disk** to write traces under the configured output directory
 
-5. **Export & Save**
+5. **Visualize Waveforms** (Waveforms tab)
+   - Browse to the folder containing downloaded waveform files (or use the project's waveform directory)
+   - The tree view displays waveforms grouped by event, station, and channel type
+   - Filter by channel type (BH/HH/EH), component (Z/N/E), or station name
+   - Select waveforms and click **Plot** to display them
+   - Choose plot style: Stacked (record section), Overlay, or Individual subplots
+   - Apply bandpass filtering or normalization as needed
+   - Use mouse to zoom and pan the interactive plot
+
+6. **Export & Save**
    - Save project checkpoints for later resumption
    - Use the DataManager utilities (or downstream tools) to inspect CSV/JSON outputs and waveform files
 
@@ -134,7 +159,10 @@ You must choose a mode to continue. You can always restart the program to switch
 4. **Download Waveforms** (Download tab)
    - Same as in array mode; the Download tab uses the confirmed event plus the selected stations
 
-5. **Export & Save**
+5. **Visualize Waveforms** (Waveforms tab)
+   - Same as in array mode
+
+6. **Export & Save**
    - Same as in array mode
 
 ## Project Structure
@@ -217,8 +245,10 @@ project/
 - **ObsPy**: Seismic data processing framework
 - **PyQt5**: GUI framework
 - **PyQtWebEngine**: Web view for interactive maps
+- **PyQtGraph**: Fast, interactive plotting for waveform visualization
 - **NumPy/SciPy**: Numerical operations
 - **Folium**: Interactive mapping
+- **Matplotlib**: Plotting (optional, for future extensions)
 - **tqdm**: Progress bars
 
 See `requirements.txt` for full list with version constraints.
@@ -289,11 +319,12 @@ Potential improvements for this standalone tool:
 - Real-time progress for individual trace downloads in non-bulk mode
 - Import existing station/event lists (CSV/JSON) and merge with freshly queried results
 - Parallel waveform and StationXML downloads using multiprocessing or async I/O
-- Waveform preview plots and basic QC (SNR, gaps, clipping) before saving
+- Enhanced waveform QC: SNR calculation, gap detection, clipping alerts
 - Data availability checks before download to avoid empty requests
 - Resume interrupted downloads and partial project recovery
 - Optional integration with downstream processing tools (e.g., RF computation pipelines)
 - Batch processing for multiple events/arrays
+- Export waveform plots to image files (PNG/PDF)
 
 ## License
 

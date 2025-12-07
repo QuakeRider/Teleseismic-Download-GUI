@@ -1,10 +1,11 @@
 """
 Main GUI window for the Seismic Data Downloader.
 
-Three tabs:
+Four tabs:
 - Stations: ROI map + provider/network/channel filters + search
 - Events: Catalog/time/magnitude/depth/distance filters + search
 - Download: Parameters + arrivals + download + save
+- Waveforms: Browse and plot downloaded mseed/sac waveforms
 """
 
 import logging
@@ -17,8 +18,20 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QComboBox, QDateTimeEdit, QDoubleSpinBox,
     QSpinBox, QCheckBox, QFileDialog, QProgressBar, QTextEdit, QDockWidget,
     QTableWidget, QTableWidgetItem, QMessageBox, QDialog, QDialogButtonBox,
-    QRadioButton, QListWidget, QListWidgetItem
+    QRadioButton, QListWidget, QListWidgetItem, QTreeWidget, QTreeWidgetItem,
+    QSplitter, QGroupBox, QSlider, QScrollArea
 )
+
+# PyQtGraph is used for waveform plotting (more compatible with Qt than matplotlib)
+# It will be imported lazily when needed
+
+# ObsPy imports for waveform reading
+HAS_OBSPY = False
+try:
+    from obspy import read, Stream, UTCDateTime
+    HAS_OBSPY = True
+except ImportError:
+    pass
 
 from data.data_manager import DataManager
 from services.station_service import StationService
@@ -379,6 +392,7 @@ class MainWindow(QMainWindow):
         self.station_tab = self._build_station_tab()
         self.event_tab = self._build_event_tab()
         self.download_tab = self._build_download_tab()
+        self.waveform_tab = self._build_waveform_tab()
 
         # Sync event times from station tab by default; allow user override
         self._ev_time_synced = True
@@ -398,16 +412,19 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.station_tab, "Stations")
         self.tabs.addTab(self.event_tab, "Events")
         self.tabs.addTab(self.download_tab, "Download")
+        self.tabs.addTab(self.waveform_tab, "Waveforms")
 
     def _init_event_mode_tabs(self):
         """Initialize tabs for single-event based workflow."""
         self.event_mode_event_tab = self._build_event_mode_event_tab()
         self.event_mode_station_tab = self._build_event_mode_station_tab()
         self.download_tab = self._build_download_tab()
+        self.waveform_tab = self._build_waveform_tab()
 
         self.tabs.addTab(self.event_mode_event_tab, "Event")
         self.tabs.addTab(self.event_mode_station_tab, "Stations")
         self.tabs.addTab(self.download_tab, "Download")
+        self.tabs.addTab(self.waveform_tab, "Waveforms")
 
     # ------------------------
     # Event-based Mode Tabs
@@ -1710,6 +1727,699 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Saved", "Waveforms saved successfully.")
         else:
             QMessageBox.warning(self, "Save Failed", "Could not save waveforms.")
+
+    # ------------------------
+    # Waveform Viewer Tab
+    # ------------------------
+    def _build_waveform_tab(self) -> QWidget:
+        """Build the waveform viewer tab for plotting downloaded seismic data."""
+        self.logger.debug("Building waveform tab...")
+
+        # Initialize internal state first to avoid attribute errors
+        self._wf_files: Dict[str, Dict] = {}  # path -> {stream, metadata}
+        self._wf_grouped: Dict[str, Dict] = {}  # event_id -> station -> channel_type -> files
+        self.wf_figure = None
+        self.wf_canvas = None
+        self.wf_toolbar = None
+
+        w = QWidget()
+        main_layout = QHBoxLayout(w)
+
+        # Left panel: controls and station tree
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+
+        # Directory selection group
+        dir_group = QGroupBox("Waveform Directory")
+        dir_layout = QVBoxLayout(dir_group)
+
+        dir_row = QHBoxLayout()
+        self.wf_dir_input = QLineEdit()
+        self.wf_dir_input.setPlaceholderText("Select waveforms directory...")
+        self.btn_wf_browse = QPushButton("Browse...")
+        self.btn_wf_browse.clicked.connect(self._on_wf_browse_dir)
+        dir_row.addWidget(self.wf_dir_input)
+        dir_row.addWidget(self.btn_wf_browse)
+        dir_layout.addLayout(dir_row)
+
+        self.btn_wf_scan = QPushButton("Scan Directory")
+        self.btn_wf_scan.clicked.connect(self._on_wf_scan_dir)
+        dir_layout.addWidget(self.btn_wf_scan)
+
+        left_layout.addWidget(dir_group)
+
+        # Filter group
+        filter_group = QGroupBox("Filters")
+        filter_layout = QFormLayout(filter_group)
+
+        # Channel type filter
+        self.wf_channel_filter = QComboBox()
+        self.wf_channel_filter.addItems(["All", "BH", "HH", "EH", "LH", "SH", "VH", "UH"])
+        self.wf_channel_filter.currentTextChanged.connect(self._on_wf_filter_changed)
+        filter_layout.addRow("Channel Type:", self.wf_channel_filter)
+
+        # Component filter
+        self.wf_component_filter = QComboBox()
+        self.wf_component_filter.addItems(["All", "Z only", "N only", "E only", "3-component"])
+        self.wf_component_filter.currentTextChanged.connect(self._on_wf_filter_changed)
+        filter_layout.addRow("Components:", self.wf_component_filter)
+
+        # Station filter
+        self.wf_station_filter = QLineEdit()
+        self.wf_station_filter.setPlaceholderText("Filter by station (e.g., AAK, *)")
+        self.wf_station_filter.textChanged.connect(self._on_wf_filter_changed)
+        filter_layout.addRow("Station:", self.wf_station_filter)
+
+        left_layout.addWidget(filter_group)
+
+        # Station/Waveform tree
+        tree_group = QGroupBox("Available Waveforms")
+        tree_layout = QVBoxLayout(tree_group)
+
+        self.wf_tree = QTreeWidget()
+        self.wf_tree.setHeaderLabels(["Station/Channel", "Components", "Samples", "Duration"])
+        self.wf_tree.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.wf_tree.itemSelectionChanged.connect(self._on_wf_selection_changed)
+        tree_layout.addWidget(self.wf_tree)
+
+        # Selection buttons
+        sel_row = QHBoxLayout()
+        self.btn_wf_select_all = QPushButton("Select All")
+        self.btn_wf_select_all.clicked.connect(self._on_wf_select_all)
+        self.btn_wf_clear_sel = QPushButton("Clear Selection")
+        self.btn_wf_clear_sel.clicked.connect(self._on_wf_clear_selection)
+        sel_row.addWidget(self.btn_wf_select_all)
+        sel_row.addWidget(self.btn_wf_clear_sel)
+        tree_layout.addLayout(sel_row)
+
+        left_layout.addWidget(tree_group, stretch=1)
+
+        # Plot options group
+        plot_group = QGroupBox("Plot Options")
+        plot_layout = QFormLayout(plot_group)
+
+        self.wf_normalize = QCheckBox("Normalize traces")
+        self.wf_normalize.setChecked(True)
+        plot_layout.addRow(self.wf_normalize)
+
+        self.wf_filter_apply = QCheckBox("Apply bandpass filter")
+        self.wf_filter_apply.setChecked(False)
+        plot_layout.addRow(self.wf_filter_apply)
+
+        freq_row = QHBoxLayout()
+        self.wf_freq_min = QDoubleSpinBox()
+        self.wf_freq_min.setRange(0.001, 50.0)
+        self.wf_freq_min.setValue(0.01)
+        self.wf_freq_min.setDecimals(3)
+        self.wf_freq_max = QDoubleSpinBox()
+        self.wf_freq_max.setRange(0.01, 50.0)
+        self.wf_freq_max.setValue(2.0)
+        self.wf_freq_max.setDecimals(2)
+        freq_row.addWidget(QLabel("Low:"))
+        freq_row.addWidget(self.wf_freq_min)
+        freq_row.addWidget(QLabel("High:"))
+        freq_row.addWidget(self.wf_freq_max)
+        plot_layout.addRow("Freq (Hz):", self._wrap(freq_row))
+
+        self.wf_plot_style = QComboBox()
+        self.wf_plot_style.addItems(["Stacked", "Overlay", "Individual"])
+        plot_layout.addRow("Plot Style:", self.wf_plot_style)
+
+        self.wf_sort_by = QComboBox()
+        self.wf_sort_by.addItems(["Station Name", "Distance", "Azimuth", "Back Azimuth"])
+        plot_layout.addRow("Sort By:", self.wf_sort_by)
+
+        left_layout.addWidget(plot_group)
+
+        # Plot button
+        self.btn_wf_plot = QPushButton("Plot Selected Waveforms")
+        self.btn_wf_plot.clicked.connect(self._on_wf_plot)
+        self.btn_wf_plot.setEnabled(False)
+        left_layout.addWidget(self.btn_wf_plot)
+
+        # Right panel: will contain matplotlib canvas (created lazily)
+        self.wf_right_panel = QWidget()
+        self.wf_right_layout = QVBoxLayout(self.wf_right_panel)
+
+        # Placeholder - matplotlib widgets will be created when first plotting
+        self.wf_plot_placeholder = QLabel("Select waveforms and click 'Plot Selected Waveforms' to display.")
+        self.wf_plot_placeholder.setAlignment(Qt.AlignCenter)
+        self.wf_right_layout.addWidget(self.wf_plot_placeholder, stretch=1)
+
+        # Status label
+        self.wf_status_label = QLabel("No waveforms loaded. Select a directory and click 'Scan Directory'.")
+        self.wf_right_layout.addWidget(self.wf_status_label)
+
+        # Use splitter for resizable panels
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(self.wf_right_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+
+        main_layout.addWidget(splitter)
+
+        return w
+
+    def _on_wf_browse_dir(self):
+        """Browse for waveform directory."""
+        # Default to project waveforms dir if available
+        default_dir = ""
+        if self.data_manager.project_dir:
+            wf_dir = self.data_manager.project_dir / 'waveforms'
+            if wf_dir.exists():
+                default_dir = str(wf_dir)
+
+        path = QFileDialog.getExistingDirectory(self, "Select Waveforms Directory", default_dir)
+        if path:
+            self.wf_dir_input.setText(path)
+
+    def _on_wf_scan_dir(self):
+        """Scan the waveform directory for mseed and sac files."""
+        wf_dir = self.wf_dir_input.text().strip()
+        if not wf_dir:
+            # Try default project waveforms directory
+            if self.data_manager.project_dir:
+                wf_dir = str(self.data_manager.project_dir / 'waveforms')
+                self.wf_dir_input.setText(wf_dir)
+            else:
+                QMessageBox.warning(self, "No Directory", "Please select a waveforms directory.")
+                return
+
+        wf_path = Path(wf_dir)
+        if not wf_path.exists():
+            QMessageBox.warning(self, "Invalid Directory", f"Directory does not exist: {wf_dir}")
+            return
+
+        self.logger.info(f"Scanning waveform directory: {wf_dir}")
+        self._wf_files.clear()
+        self._wf_grouped.clear()
+        self.wf_tree.clear()
+
+        # Find all mseed and sac files
+        mseed_files = list(wf_path.rglob("*.mseed"))
+        sac_files = list(wf_path.rglob("*.sac"))
+        all_files = mseed_files + sac_files
+
+        if not all_files:
+            QMessageBox.information(self, "No Files", "No mseed or sac files found in the directory.")
+            self.wf_status_label.setText("No waveform files found.")
+            return
+
+        self.logger.info(f"Found {len(all_files)} waveform files")
+
+        # Process files in background
+        self.btn_wf_scan.setEnabled(False)
+        self.wf_status_label.setText(f"Scanning {len(all_files)} files...")
+
+        def scan_files():
+            files_info = {}
+            grouped = {}
+            errors = []  # Collect errors to log in main thread
+
+            for fpath in all_files:
+                try:
+                    # Read waveform header only for speed
+                    st = read(str(fpath), headonly=True)
+                    if len(st) == 0:
+                        continue
+
+                    tr = st[0]
+                    net = tr.stats.network
+                    sta = tr.stats.station
+                    loc = tr.stats.location
+                    cha = tr.stats.channel
+                    npts = tr.stats.npts
+                    sr = tr.stats.sampling_rate
+                    duration = npts / sr if sr > 0 else 0
+
+                    # Extract channel type (first 2 chars) and component (last char)
+                    channel_type = cha[:2] if len(cha) >= 2 else cha
+                    component = cha[-1] if len(cha) >= 1 else ""
+
+                    # Get event_id from parent directory name
+                    event_id = fpath.parent.name
+
+                    files_info[str(fpath)] = {
+                        'path': str(fpath),
+                        'network': net,
+                        'station': sta,
+                        'location': loc,
+                        'channel': cha,
+                        'channel_type': channel_type,
+                        'component': component,
+                        'npts': npts,
+                        'sampling_rate': sr,
+                        'duration': duration,
+                        'event_id': event_id,
+                    }
+
+                    # Group by event -> station -> channel_type
+                    if event_id not in grouped:
+                        grouped[event_id] = {}
+                    if sta not in grouped[event_id]:
+                        grouped[event_id][sta] = {}
+                    if channel_type not in grouped[event_id][sta]:
+                        grouped[event_id][sta][channel_type] = []
+                    grouped[event_id][sta][channel_type].append(str(fpath))
+
+                except Exception as e:
+                    errors.append(f"Could not read {fpath}: {e}")
+
+            return files_info, grouped, errors
+
+        def on_finished(result):
+            self.btn_wf_scan.setEnabled(True)
+            if result is None:
+                QMessageBox.warning(self, "Error", "Failed to scan waveform files.")
+                return
+
+            files_info, grouped, errors = result
+            self._wf_files = files_info
+            self._wf_grouped = grouped
+
+            # Log errors from worker thread in main thread
+            for err in errors:
+                self.logger.warning(err)
+
+            self._populate_wf_tree()
+            self.wf_status_label.setText(f"Loaded {len(files_info)} waveform files from {len(grouped)} event(s).")
+            self.logger.info(f"Scanned {len(files_info)} waveform files from {len(grouped)} events")
+
+        def on_error(msg):
+            self.btn_wf_scan.setEnabled(True)
+            QMessageBox.critical(self, "Error", f"Scan failed: {msg}")
+
+        worker = WorkerThread(scan_files)
+        self._run_worker(worker, on_finished, on_error)
+
+    def _populate_wf_tree(self):
+        """Populate the waveform tree widget based on filters."""
+        self.wf_tree.clear()
+
+        channel_filter = self.wf_channel_filter.currentText()
+        component_filter = self.wf_component_filter.currentText()
+        station_filter = self.wf_station_filter.text().strip().upper()
+
+        for event_id, stations in sorted(self._wf_grouped.items()):
+            event_item = QTreeWidgetItem([event_id, "", "", ""])
+            event_item.setData(0, Qt.UserRole, {'type': 'event', 'event_id': event_id})
+            has_children = False
+
+            for sta_name, channel_types in sorted(stations.items()):
+                # Apply station filter
+                if station_filter and station_filter != "*":
+                    if station_filter not in sta_name:
+                        continue
+
+                sta_item = QTreeWidgetItem([sta_name, "", "", ""])
+                sta_item.setData(0, Qt.UserRole, {'type': 'station', 'station': sta_name, 'event_id': event_id})
+                has_sta_children = False
+
+                for chan_type, file_paths in sorted(channel_types.items()):
+                    # Apply channel type filter
+                    if channel_filter != "All" and chan_type != channel_filter:
+                        continue
+
+                    # Get component info
+                    components = set()
+                    total_samples = 0
+                    total_duration = 0
+                    for fp in file_paths:
+                        info = self._wf_files.get(fp, {})
+                        comp = info.get('component', '')
+                        if comp:
+                            components.add(comp)
+                        total_samples += info.get('npts', 0)
+                        total_duration = max(total_duration, info.get('duration', 0))
+
+                    # Apply component filter
+                    if component_filter == "Z only" and 'Z' not in components:
+                        continue
+                    elif component_filter == "N only" and 'N' not in components:
+                        continue
+                    elif component_filter == "E only" and 'E' not in components:
+                        continue
+                    elif component_filter == "3-component":
+                        if not ({'Z', 'N', 'E'}.issubset(components) or
+                                {'Z', '1', '2'}.issubset(components)):
+                            continue
+
+                    comp_str = ",".join(sorted(components))
+                    duration_str = f"{total_duration:.1f}s" if total_duration > 0 else ""
+
+                    chan_item = QTreeWidgetItem([f"{chan_type}", comp_str, str(len(file_paths)), duration_str])
+                    chan_item.setData(0, Qt.UserRole, {
+                        'type': 'channel',
+                        'channel_type': chan_type,
+                        'station': sta_name,
+                        'event_id': event_id,
+                        'files': file_paths
+                    })
+
+                    sta_item.addChild(chan_item)
+                    has_sta_children = True
+
+                if has_sta_children:
+                    event_item.addChild(sta_item)
+                    has_children = True
+
+            if has_children:
+                self.wf_tree.addTopLevelItem(event_item)
+                event_item.setExpanded(True)
+
+        self.wf_tree.resizeColumnToContents(0)
+        self.wf_tree.resizeColumnToContents(1)
+        self.wf_tree.resizeColumnToContents(2)
+
+    def _on_wf_filter_changed(self, *args):
+        """Re-filter the tree when filter settings change."""
+        self._populate_wf_tree()
+
+    def _on_wf_selection_changed(self):
+        """Handle selection changes in the waveform tree."""
+        selected = self.wf_tree.selectedItems()
+        self.btn_wf_plot.setEnabled(len(selected) > 0)
+
+    def _on_wf_select_all(self):
+        """Select all visible items in the tree."""
+        self.wf_tree.selectAll()
+
+    def _on_wf_clear_selection(self):
+        """Clear all selections."""
+        self.wf_tree.clearSelection()
+
+    def _get_selected_waveform_files(self) -> List[str]:
+        """Get list of selected waveform file paths."""
+        selected_files = []
+        selected_items = self.wf_tree.selectedItems()
+
+        for item in selected_items:
+            data = item.data(0, Qt.UserRole)
+            if not data:
+                continue
+
+            item_type = data.get('type')
+
+            if item_type == 'channel':
+                # Directly selected channel type - add all its files
+                selected_files.extend(data.get('files', []))
+
+            elif item_type == 'station':
+                # Station selected - add all channel types under it
+                for i in range(item.childCount()):
+                    child = item.child(i)
+                    child_data = child.data(0, Qt.UserRole)
+                    if child_data:
+                        selected_files.extend(child_data.get('files', []))
+
+            elif item_type == 'event':
+                # Event selected - add all stations and channels under it
+                for i in range(item.childCount()):
+                    sta_item = item.child(i)
+                    for j in range(sta_item.childCount()):
+                        chan_item = sta_item.child(j)
+                        chan_data = chan_item.data(0, Qt.UserRole)
+                        if chan_data:
+                            selected_files.extend(chan_data.get('files', []))
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_files = []
+        for f in selected_files:
+            if f not in seen:
+                seen.add(f)
+                unique_files.append(f)
+
+        return unique_files
+
+    def _ensure_pyqtgraph_widget(self) -> bool:
+        """Lazily create pyqtgraph plot widget when first needed. Returns True if successful."""
+        if self.wf_canvas is not None:
+            return True
+
+        try:
+            import pyqtgraph as pg
+
+            # Remove placeholder
+            if self.wf_plot_placeholder is not None:
+                self.wf_right_layout.removeWidget(self.wf_plot_placeholder)
+                self.wf_plot_placeholder.deleteLater()
+                self.wf_plot_placeholder = None
+
+            # Create a pyqtgraph GraphicsLayoutWidget for multiple plots
+            self.wf_plot_widget = pg.GraphicsLayoutWidget()
+            self.wf_plot_widget.setBackground('w')
+
+            # Insert the plot widget
+            self.wf_right_layout.insertWidget(0, self.wf_plot_widget, stretch=1)
+
+            # Set wf_canvas to a marker value so we know it's initialized
+            self.wf_canvas = "initialized"
+
+            self.logger.info("PyQtGraph initialized successfully")
+            return True
+
+        except ImportError:
+            QMessageBox.warning(self, "PyQtGraph Required",
+                              "PyQtGraph is required for waveform plotting.\nInstall with: pip install pyqtgraph")
+            return False
+        except Exception as e:
+            self.logger.error(f"Failed to create pyqtgraph widget: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to create plot widget:\n{e}")
+            return False
+
+    def _on_wf_plot(self):
+        """Plot the selected waveforms."""
+        if not HAS_OBSPY:
+            QMessageBox.warning(self, "ObsPy Required", "ObsPy is required for waveform plotting.")
+            return
+
+        selected_files = self._get_selected_waveform_files()
+        if not selected_files:
+            QMessageBox.warning(self, "No Selection", "Please select waveforms to plot.")
+            return
+
+        # Load waveforms FIRST, before creating plot widget
+        self.wf_status_label.setText(f"Loading {len(selected_files)} waveforms...")
+        self.btn_wf_plot.setEnabled(False)
+
+        st = Stream()
+        errors = []
+        for i, fpath in enumerate(selected_files):
+            try:
+                st += read(fpath)
+            except Exception as e:
+                errors.append(f"Could not read {fpath}: {e}")
+
+        if len(st) == 0:
+            QMessageBox.warning(self, "No Data", "Could not load any waveform data.")
+            self.wf_status_label.setText("No waveforms to display.")
+            self.btn_wf_plot.setEnabled(True)
+            for err in errors:
+                self.logger.warning(err)
+            return
+
+        # NOW create pyqtgraph widget (after data is loaded)
+        if not self._ensure_pyqtgraph_widget():
+            self.btn_wf_plot.setEnabled(True)
+            return
+
+        # Log any errors from loading
+        for err in errors:
+            self.logger.warning(err)
+
+        try:
+            self._plot_waveforms(st)
+        except Exception as e:
+            self.logger.error(f"Error in _plot_waveforms: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Plot Error", f"Error plotting waveforms: {e}")
+
+        self.wf_status_label.setText(f"Plotted {len(st)} traces.")
+        self.btn_wf_plot.setEnabled(True)
+
+    def _plot_waveforms(self, stream: 'Stream'):
+        """Plot the loaded waveforms using pyqtgraph."""
+        import pyqtgraph as pg
+        import numpy as np
+
+        # Apply processing if requested
+        st = stream.copy()
+
+        # Apply bandpass filter if enabled
+        if self.wf_filter_apply.isChecked():
+            try:
+                freq_min = self.wf_freq_min.value()
+                freq_max = self.wf_freq_max.value()
+                st.filter('bandpass', freqmin=freq_min, freqmax=freq_max, corners=4, zerophase=True)
+                self.logger.info(f"Applied bandpass filter: {freq_min}-{freq_max} Hz")
+            except Exception as e:
+                self.logger.warning(f"Could not apply filter: {e}")
+
+        # Sort traces
+        sort_by = self.wf_sort_by.currentText()
+        if sort_by == "Station Name":
+            st.sort(['station'])
+        elif sort_by == "Distance":
+            arrivals = self.data_manager.get_arrivals() or {}
+            def get_distance(tr):
+                key = f"{tr.stats.network}.{tr.stats.station}"
+                for arr_key, arr_data in arrivals.items():
+                    if key in arr_key:
+                        return arr_data.get('distance_deg', 999)
+                return 999
+            st.traces.sort(key=get_distance)
+
+        # Normalize if requested
+        if self.wf_normalize.isChecked():
+            for tr in st:
+                tr.normalize()
+
+        plot_style = self.wf_plot_style.currentText()
+
+        # Clear previous plots
+        self.wf_plot_widget.clear()
+
+        # Define colors for different traces
+        colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k', 'w',
+                  (255, 128, 0), (128, 0, 255), (0, 128, 255), (255, 0, 128)]
+
+        if plot_style == "Stacked":
+            self._plot_stacked_pyqtgraph(st, colors)
+        elif plot_style == "Overlay":
+            self._plot_overlay_pyqtgraph(st, colors)
+        else:  # Individual
+            self._plot_individual_pyqtgraph(st, colors)
+
+        self.logger.info(f"Plotted {len(st)} traces using pyqtgraph")
+
+    def _plot_stacked_pyqtgraph(self, stream: 'Stream', colors):
+        """Plot waveforms in stacked/record section style using pyqtgraph."""
+        import pyqtgraph as pg
+        import numpy as np
+
+        n_traces = len(stream)
+        if n_traces == 0:
+            return
+
+        # Create a single plot for stacked view
+        plot = self.wf_plot_widget.addPlot()
+        plot.setLabel('bottom', 'Time', units='s')
+        plot.showGrid(x=True, y=True, alpha=0.3)
+
+        # Get start time for title
+        if n_traces > 0:
+            start_time = min(tr.stats.starttime for tr in stream)
+            plot.setTitle(f"Waveforms starting at {start_time}")
+
+        y_offset = 0
+        y_ticks = []
+
+        for i, tr in enumerate(stream):
+            times = tr.times()
+            data = tr.data.copy()
+
+            # Normalize for display
+            max_val = np.abs(data).max()
+            if max_val > 0:
+                data = data / max_val
+
+            # Plot with offset
+            pen = pg.mkPen(color='k', width=1)
+            plot.plot(times, data + y_offset, pen=pen)
+
+            # Store tick position and label
+            label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
+            y_ticks.append((y_offset, label))
+
+            y_offset += 1.5
+
+        # Set y-axis ticks
+        y_axis = plot.getAxis('left')
+        y_axis.setTicks([y_ticks])
+
+    def _plot_overlay_pyqtgraph(self, stream: 'Stream', colors):
+        """Plot all waveforms overlaid on the same axes using pyqtgraph."""
+        import pyqtgraph as pg
+        import numpy as np
+
+        n_traces = len(stream)
+        if n_traces == 0:
+            return
+
+        # Create a single plot
+        plot = self.wf_plot_widget.addPlot()
+        plot.setLabel('bottom', 'Time', units='s')
+        plot.setLabel('left', 'Amplitude')
+        plot.showGrid(x=True, y=True, alpha=0.3)
+        plot.addLegend()
+
+        # Get start time for title
+        if n_traces > 0:
+            start_time = min(tr.stats.starttime for tr in stream)
+            plot.setTitle(f"Waveforms starting at {start_time}")
+
+        for i, tr in enumerate(stream):
+            times = tr.times()
+            data = tr.data.copy()
+
+            # Normalize for display
+            max_val = np.abs(data).max()
+            if max_val > 0:
+                data = data / max_val
+
+            color = colors[i % len(colors)]
+            pen = pg.mkPen(color=color, width=1)
+            label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
+            plot.plot(times, data, pen=pen, name=label)
+
+    def _plot_individual_pyqtgraph(self, stream: 'Stream', colors):
+        """Plot each waveform in its own subplot using pyqtgraph."""
+        import pyqtgraph as pg
+        import numpy as np
+
+        n_traces = len(stream)
+        if n_traces == 0:
+            return
+
+        # Get start time for title
+        start_time = min(tr.stats.starttime for tr in stream)
+
+        # Create individual plots stacked vertically
+        prev_plot = None
+        for i, tr in enumerate(stream):
+            times = tr.times()
+            data = tr.data.copy()
+
+            # Normalize for display
+            max_val = np.abs(data).max()
+            if max_val > 0:
+                data = data / max_val
+
+            # Create plot
+            plot = self.wf_plot_widget.addPlot(row=i, col=0)
+            plot.showGrid(x=True, y=True, alpha=0.3)
+
+            label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
+            plot.setLabel('left', label)
+
+            if i == 0:
+                plot.setTitle(f"Waveforms starting at {start_time}")
+            if i == n_traces - 1:
+                plot.setLabel('bottom', 'Time', units='s')
+            else:
+                plot.hideAxis('bottom')
+
+            # Link x-axes for synchronized zooming/panning
+            if prev_plot is not None:
+                plot.setXLink(prev_plot)
+            prev_plot = plot
+
+            color = colors[i % len(colors)]
+            pen = pg.mkPen(color=color, width=1)
+            plot.plot(times, data, pen=pen)
 
     # ------------------------
     # Progress handlers
