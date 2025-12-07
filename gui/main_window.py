@@ -2282,8 +2282,19 @@ class MainWindow(QMainWindow):
 
     def _plot_waveforms(self, stream: 'Stream'):
         """Plot the loaded waveforms on the matplotlib canvas."""
+        import sys
+
+        # Check matplotlib backend
+        import matplotlib
+        sys.stderr.write(f"[DEBUG] matplotlib backend: {matplotlib.get_backend()}\n")
+        sys.stderr.flush()
+
         # Apply processing if requested
+        sys.stderr.write("[DEBUG] Copying stream...\n")
+        sys.stderr.flush()
         st = stream.copy()
+        sys.stderr.write("[DEBUG] Stream copied\n")
+        sys.stderr.flush()
 
         # Apply bandpass filter if enabled
         if self.wf_filter_apply.isChecked():
@@ -2316,34 +2327,58 @@ class MainWindow(QMainWindow):
                 tr.normalize()
 
         # Clear figure
+        sys.stderr.write("[DEBUG] Clearing figure...\n")
+        sys.stderr.flush()
         self.wf_figure.clear()
+        sys.stderr.write("[DEBUG] Figure cleared\n")
+        sys.stderr.flush()
 
         plot_style = self.wf_plot_style.currentText()
+        sys.stderr.write(f"[DEBUG] Plot style: {plot_style}\n")
+        sys.stderr.flush()
 
         if plot_style == "Stacked":
+            sys.stderr.write("[DEBUG] Calling _plot_stacked...\n")
+            sys.stderr.flush()
             self._plot_stacked(st)
+            sys.stderr.write("[DEBUG] _plot_stacked done\n")
+            sys.stderr.flush()
         elif plot_style == "Overlay":
             self._plot_overlay(st)
         else:  # Individual
             self._plot_individual(st)
 
         # Render figure to PNG in memory and display as QPixmap
+        sys.stderr.write("[DEBUG] Starting render...\n")
+        sys.stderr.flush()
         try:
             from PyQt5.QtGui import QPixmap
             from io import BytesIO
 
             # Save figure to a BytesIO buffer as PNG
+            sys.stderr.write("[DEBUG] Calling savefig...\n")
+            sys.stderr.flush()
             buf = BytesIO()
             # Avoid bbox_inches='tight' - can cause crashes on some systems
             self.wf_figure.savefig(buf, format='png', dpi=80)
+            sys.stderr.write("[DEBUG] savefig complete\n")
+            sys.stderr.flush()
             buf.seek(0)
 
             # Load the PNG into a QPixmap
+            sys.stderr.write("[DEBUG] Loading QPixmap...\n")
+            sys.stderr.flush()
             pixmap = QPixmap()
             pixmap.loadFromData(buf.getvalue())
+            sys.stderr.write("[DEBUG] QPixmap loaded\n")
+            sys.stderr.flush()
 
             # Display in the QLabel
+            sys.stderr.write("[DEBUG] Setting pixmap on label...\n")
+            sys.stderr.flush()
             self.wf_image_label.setPixmap(pixmap)
+            sys.stderr.write("[DEBUG] Done!\n")
+            sys.stderr.flush()
             self.logger.info(f"Plot rendered: {pixmap.width()}x{pixmap.height()} pixels")
 
         except Exception as e:
@@ -2351,11 +2386,19 @@ class MainWindow(QMainWindow):
 
     def _plot_stacked(self, stream: 'Stream'):
         """Plot waveforms in stacked/record section style."""
+        import sys
+        sys.stderr.write(f"[DEBUG] _plot_stacked: {len(stream)} traces\n")
+        sys.stderr.flush()
+
         n_traces = len(stream)
         if n_traces == 0:
             return
 
+        sys.stderr.write("[DEBUG] _plot_stacked: adding subplot...\n")
+        sys.stderr.flush()
         ax = self.wf_figure.add_subplot(111)
+        sys.stderr.write("[DEBUG] _plot_stacked: subplot added\n")
+        sys.stderr.flush()
 
         # Group by station for better organization
         traces_by_station = {}
@@ -2382,7 +2425,11 @@ class MainWindow(QMainWindow):
                 if self.wf_normalize.isChecked():
                     data = data / (abs(data).max() + 1e-10)
 
+                sys.stderr.write(f"[DEBUG] _plot_stacked: plotting trace {sta_key}...\n")
+                sys.stderr.flush()
                 ax.plot(times, data + y_offset, 'k-', linewidth=0.5)
+                sys.stderr.write(f"[DEBUG] _plot_stacked: trace plotted\n")
+                sys.stderr.flush()
 
                 label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
                 y_labels.append(label)
@@ -2390,6 +2437,8 @@ class MainWindow(QMainWindow):
 
                 y_offset += 1.5  # Spacing between traces
 
+        sys.stderr.write("[DEBUG] _plot_stacked: setting axis labels...\n")
+        sys.stderr.flush()
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Station.Channel")
         ax.set_yticks(y_positions)
