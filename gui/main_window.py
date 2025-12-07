@@ -2281,20 +2281,18 @@ class MainWindow(QMainWindow):
         self.btn_wf_plot.setEnabled(True)
 
     def _plot_waveforms(self, stream: 'Stream'):
-        """Plot the loaded waveforms on the matplotlib canvas."""
+        """Plot the loaded waveforms using subprocess to avoid Qt-matplotlib conflicts."""
         import sys
+        import subprocess
+        import tempfile
+        import json
+        import os
 
-        # Check matplotlib backend
-        import matplotlib
-        sys.stderr.write(f"[DEBUG] matplotlib backend: {matplotlib.get_backend()}\n")
+        sys.stderr.write("[DEBUG] _plot_waveforms: starting subprocess approach\n")
         sys.stderr.flush()
 
         # Apply processing if requested
-        sys.stderr.write("[DEBUG] Copying stream...\n")
-        sys.stderr.flush()
         st = stream.copy()
-        sys.stderr.write("[DEBUG] Stream copied\n")
-        sys.stderr.flush()
 
         # Apply bandpass filter if enabled
         if self.wf_filter_apply.isChecked():
@@ -2311,7 +2309,6 @@ class MainWindow(QMainWindow):
         if sort_by == "Station Name":
             st.sort(['station'])
         elif sort_by == "Distance":
-            # Sort by distance if available in arrivals data
             arrivals = self.data_manager.get_arrivals() or {}
             def get_distance(tr):
                 key = f"{tr.stats.network}.{tr.stats.station}"
@@ -2326,84 +2323,173 @@ class MainWindow(QMainWindow):
             for tr in st:
                 tr.normalize()
 
-        # Clear figure
-        sys.stderr.write("[DEBUG] Clearing figure...\n")
-        sys.stderr.flush()
-        self.wf_figure.clear()
-        sys.stderr.write("[DEBUG] Figure cleared\n")
-        sys.stderr.flush()
-
         plot_style = self.wf_plot_style.currentText()
-        sys.stderr.write(f"[DEBUG] Plot style: {plot_style}\n")
+
+        # Prepare trace data for subprocess
+        trace_data = []
+        for tr in st:
+            trace_data.append({
+                'network': tr.stats.network,
+                'station': tr.stats.station,
+                'channel': tr.stats.channel,
+                'starttime': str(tr.stats.starttime),
+                'sampling_rate': tr.stats.sampling_rate,
+                'data': tr.data.tolist()
+            })
+
+        sys.stderr.write(f"[DEBUG] Prepared {len(trace_data)} traces for plotting\n")
         sys.stderr.flush()
 
-        if plot_style == "Stacked":
-            sys.stderr.write("[DEBUG] Calling _plot_stacked...\n")
-            sys.stderr.flush()
-            self._plot_stacked(st)
-            sys.stderr.write("[DEBUG] _plot_stacked done\n")
-            sys.stderr.flush()
-        elif plot_style == "Overlay":
-            self._plot_overlay(st)
-        else:  # Individual
-            self._plot_individual(st)
+        # Create temporary files for data and output
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump({'traces': trace_data, 'style': plot_style}, f)
+            data_file = f.name
 
-        # Render figure to image and display as QPixmap
-        sys.stderr.write("[DEBUG] Starting render...\n")
-        sys.stderr.flush()
+        output_file = tempfile.mktemp(suffix='.png')
+
+        # Python script to run in subprocess
+        plot_script = '''
+import sys
+import json
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+data_file = sys.argv[1]
+output_file = sys.argv[2]
+
+with open(data_file, 'r') as f:
+    data = json.load(f)
+
+traces = data['traces']
+style = data['style']
+
+fig, ax = plt.subplots(figsize=(12, 8))
+
+if style == "Stacked":
+    y_offset = 0
+    y_labels = []
+    y_positions = []
+    for tr in traces:
+        times = np.arange(len(tr['data'])) / tr['sampling_rate']
+        trace_data = np.array(tr['data'])
+        # Normalize for display
+        max_val = np.abs(trace_data).max()
+        if max_val > 0:
+            trace_data = trace_data / max_val
+        ax.plot(times, trace_data + y_offset, 'k-', linewidth=0.5)
+        label = f"{tr['network']}.{tr['station']}.{tr['channel']}"
+        y_labels.append(label)
+        y_positions.append(y_offset)
+        y_offset += 1.5
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Station.Channel")
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(y_labels, fontsize=8)
+    if traces:
+        ax.set_title(f"Waveforms starting at {traces[0]['starttime']}")
+    ax.grid(True, alpha=0.3)
+
+elif style == "Overlay":
+    colors = plt.cm.tab10.colors
+    for i, tr in enumerate(traces):
+        times = np.arange(len(tr['data'])) / tr['sampling_rate']
+        trace_data = np.array(tr['data'])
+        max_val = np.abs(trace_data).max()
+        if max_val > 0:
+            trace_data = trace_data / max_val
+        color = colors[i % len(colors)]
+        label = f"{tr['network']}.{tr['station']}.{tr['channel']}"
+        ax.plot(times, trace_data, color=color, linewidth=0.7, label=label, alpha=0.8)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Amplitude")
+    if traces:
+        ax.set_title(f"Waveforms starting at {traces[0]['starttime']}")
+    ax.legend(loc='upper right', fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+else:  # Individual
+    n_traces = len(traces)
+    if n_traces > 0:
+        fig, axes = plt.subplots(n_traces, 1, figsize=(12, 2*n_traces), sharex=True)
+        if n_traces == 1:
+            axes = [axes]
+        for i, tr in enumerate(traces):
+            times = np.arange(len(tr['data'])) / tr['sampling_rate']
+            trace_data = np.array(tr['data'])
+            axes[i].plot(times, trace_data, 'k-', linewidth=0.5)
+            label = f"{tr['network']}.{tr['station']}.{tr['channel']}"
+            axes[i].set_ylabel(label, fontsize=8)
+            axes[i].grid(True, alpha=0.3)
+        axes[-1].set_xlabel("Time (s)")
+        if traces:
+            axes[0].set_title(f"Waveforms starting at {traces[0]['starttime']}")
+
+plt.savefig(output_file, dpi=100, bbox_inches='tight')
+plt.close()
+print("OK")
+'''
+
         try:
-            from PyQt5.QtGui import QPixmap, QImage
-            import numpy as np
-
-            # Draw the canvas to update the renderer
-            sys.stderr.write("[DEBUG] Drawing canvas...\n")
-            sys.stderr.flush()
-            self.wf_agg_canvas.draw()
-            sys.stderr.write("[DEBUG] Canvas drawn\n")
+            sys.stderr.write("[DEBUG] Running subprocess...\n")
             sys.stderr.flush()
 
-            # Get the RGBA buffer from the canvas
-            sys.stderr.write("[DEBUG] Getting buffer...\n")
-            sys.stderr.flush()
-            buf = self.wf_agg_canvas.buffer_rgba()
-            sys.stderr.write("[DEBUG] Buffer obtained\n")
+            # Run the plot script in a subprocess
+            result = subprocess.run(
+                [sys.executable, '-c', plot_script, data_file, output_file],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            sys.stderr.write(f"[DEBUG] Subprocess returned: {result.returncode}\n")
             sys.stderr.flush()
 
-            # Get dimensions
-            width, height = self.wf_figure.get_size_inches() * self.wf_figure.get_dpi()
-            width, height = int(width), int(height)
-            sys.stderr.write(f"[DEBUG] Dimensions: {width}x{height}\n")
+            if result.returncode != 0:
+                sys.stderr.write(f"[DEBUG] Subprocess stderr: {result.stderr}\n")
+                sys.stderr.flush()
+                raise RuntimeError(f"Plot subprocess failed: {result.stderr}")
+
+            # Load the generated image
+            sys.stderr.write("[DEBUG] Loading output image...\n")
             sys.stderr.flush()
 
-            # Convert buffer to numpy array and then to QImage
-            sys.stderr.write("[DEBUG] Creating QImage...\n")
-            sys.stderr.flush()
-            arr = np.asarray(buf)
-            qimage = QImage(arr.data, width, height, QImage.Format_RGBA8888)
-            sys.stderr.write("[DEBUG] QImage created\n")
-            sys.stderr.flush()
+            from PyQt5.QtGui import QPixmap
+            pixmap = QPixmap(output_file)
 
-            # Convert to QPixmap
-            sys.stderr.write("[DEBUG] Converting to QPixmap...\n")
-            sys.stderr.flush()
-            pixmap = QPixmap.fromImage(qimage.copy())  # .copy() to detach from buffer
-            sys.stderr.write("[DEBUG] QPixmap created\n")
+            if pixmap.isNull():
+                raise RuntimeError("Failed to load generated plot image")
+
+            sys.stderr.write(f"[DEBUG] Image loaded: {pixmap.width()}x{pixmap.height()}\n")
             sys.stderr.flush()
 
             # Display in the QLabel
-            sys.stderr.write("[DEBUG] Setting pixmap on label...\n")
-            sys.stderr.flush()
             self.wf_image_label.setPixmap(pixmap)
-            sys.stderr.write("[DEBUG] Done!\n")
-            sys.stderr.flush()
             self.logger.info(f"Plot rendered: {pixmap.width()}x{pixmap.height()} pixels")
 
-        except Exception as e:
-            sys.stderr.write(f"[DEBUG] Render error: {e}\n")
+            sys.stderr.write("[DEBUG] Done!\n")
             sys.stderr.flush()
-            self.logger.error(f"Render error: {e}")
+
+        except subprocess.TimeoutExpired:
+            self.logger.error("Plot subprocess timed out")
+            QMessageBox.warning(self, "Timeout", "Plot generation timed out.")
+        except Exception as e:
+            sys.stderr.write(f"[DEBUG] Error: {e}\n")
+            sys.stderr.flush()
+            self.logger.error(f"Plot error: {e}")
             import traceback
             traceback.print_exc()
+        finally:
+            # Clean up temporary files
+            try:
+                os.unlink(data_file)
+            except:
+                pass
+            try:
+                os.unlink(output_file)
+            except:
+                pass
 
     def _plot_stacked(self, stream: 'Stream'):
         """Plot waveforms in stacked/record section style."""
