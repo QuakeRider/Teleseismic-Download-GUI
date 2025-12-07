@@ -22,43 +22,8 @@ from PyQt5.QtWidgets import (
     QSplitter, QGroupBox, QSlider, QScrollArea
 )
 
-# Matplotlib will be imported lazily using Agg backend (non-interactive)
-# to avoid Qt-matplotlib crashes
-_matplotlib_initialized = False
-_matplotlib_available = False
-_mpl_Figure = None
-_mpl_FigureCanvasAgg = None
-
-
-def _init_matplotlib():
-    """Lazily initialize matplotlib with Agg backend (non-interactive, memory-based)."""
-    global _matplotlib_initialized, _matplotlib_available
-    global _mpl_Figure, _mpl_FigureCanvasAgg
-
-    if _matplotlib_initialized:
-        return _matplotlib_available
-
-    _matplotlib_initialized = True
-
-    try:
-        # Use Agg backend - renders to memory, no GUI
-        import matplotlib
-        matplotlib.use('Agg')
-
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-
-        _mpl_Figure = Figure
-        _mpl_FigureCanvasAgg = FigureCanvasAgg
-        _matplotlib_available = True
-
-    except Exception as e:
-        import logging
-        logging.warning(f"Could not initialize matplotlib: {e}")
-        _matplotlib_available = False
-
-    return _matplotlib_available
-
+# PyQtGraph is used for waveform plotting (more compatible with Qt than matplotlib)
+# It will be imported lazily when needed
 
 # ObsPy imports for waveform reading
 HAS_OBSPY = False
@@ -2188,47 +2153,40 @@ class MainWindow(QMainWindow):
 
         return unique_files
 
-    def _ensure_matplotlib_canvas(self) -> bool:
-        """Lazily create matplotlib canvas when first needed. Returns True if successful."""
+    def _ensure_pyqtgraph_widget(self) -> bool:
+        """Lazily create pyqtgraph plot widget when first needed. Returns True if successful."""
         if self.wf_canvas is not None:
             return True
 
-        # Try to initialize matplotlib with Agg backend
-        if not _init_matplotlib():
-            QMessageBox.warning(self, "Matplotlib Error",
-                              "Could not initialize matplotlib.\nPlease ensure matplotlib is installed: pip install matplotlib")
-            return False
-
         try:
+            import pyqtgraph as pg
+
             # Remove placeholder
             if self.wf_plot_placeholder is not None:
                 self.wf_right_layout.removeWidget(self.wf_plot_placeholder)
                 self.wf_plot_placeholder.deleteLater()
                 self.wf_plot_placeholder = None
 
-            # Create matplotlib figure with Agg canvas (renders to memory)
-            self.wf_figure = _mpl_Figure(figsize=(12, 8), dpi=100)
-            self.wf_agg_canvas = _mpl_FigureCanvasAgg(self.wf_figure)
+            # Create a pyqtgraph GraphicsLayoutWidget for multiple plots
+            self.wf_plot_widget = pg.GraphicsLayoutWidget()
+            self.wf_plot_widget.setBackground('w')
 
-            # Create a QLabel inside a QScrollArea to display the rendered image
-            self.wf_scroll = QScrollArea()
-            self.wf_scroll.setWidgetResizable(True)
-            self.wf_image_label = QLabel()
-            self.wf_image_label.setAlignment(Qt.AlignCenter)
-            self.wf_scroll.setWidget(self.wf_image_label)
-
-            # Insert the scroll area
-            self.wf_right_layout.insertWidget(0, self.wf_scroll, stretch=1)
+            # Insert the plot widget
+            self.wf_right_layout.insertWidget(0, self.wf_plot_widget, stretch=1)
 
             # Set wf_canvas to a marker value so we know it's initialized
             self.wf_canvas = "initialized"
 
-            self.logger.info("Matplotlib (Agg backend) initialized successfully")
+            self.logger.info("PyQtGraph initialized successfully")
             return True
 
+        except ImportError:
+            QMessageBox.warning(self, "PyQtGraph Required",
+                              "PyQtGraph is required for waveform plotting.\nInstall with: pip install pyqtgraph")
+            return False
         except Exception as e:
-            self.logger.error(f"Failed to create matplotlib figure: {e}")
-            QMessageBox.warning(self, "Error", f"Failed to create plot canvas:\n{e}")
+            self.logger.error(f"Failed to create pyqtgraph widget: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to create plot widget:\n{e}")
             return False
 
     def _on_wf_plot(self):
@@ -2242,7 +2200,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Selection", "Please select waveforms to plot.")
             return
 
-        # Load waveforms FIRST, before creating matplotlib canvas
+        # Load waveforms FIRST, before creating plot widget
         self.wf_status_label.setText(f"Loading {len(selected_files)} waveforms...")
         self.btn_wf_plot.setEnabled(False)
 
@@ -2262,8 +2220,8 @@ class MainWindow(QMainWindow):
                 self.logger.warning(err)
             return
 
-        # NOW create matplotlib canvas (after data is loaded)
-        if not self._ensure_matplotlib_canvas():
+        # NOW create pyqtgraph widget (after data is loaded)
+        if not self._ensure_pyqtgraph_widget():
             self.btn_wf_plot.setEnabled(True)
             return
 
@@ -2275,21 +2233,17 @@ class MainWindow(QMainWindow):
             self._plot_waveforms(st)
         except Exception as e:
             self.logger.error(f"Error in _plot_waveforms: {e}")
+            import traceback
+            traceback.print_exc()
             QMessageBox.warning(self, "Plot Error", f"Error plotting waveforms: {e}")
 
         self.wf_status_label.setText(f"Plotted {len(st)} traces.")
         self.btn_wf_plot.setEnabled(True)
 
     def _plot_waveforms(self, stream: 'Stream'):
-        """Plot the loaded waveforms using subprocess to avoid Qt-matplotlib conflicts."""
-        import sys
-        import subprocess
-        import tempfile
-        import json
-        import os
-
-        sys.stderr.write("[DEBUG] _plot_waveforms: starting subprocess approach\n")
-        sys.stderr.flush()
+        """Plot the loaded waveforms using pyqtgraph."""
+        import pyqtgraph as pg
+        import numpy as np
 
         # Apply processing if requested
         st = stream.copy()
@@ -2325,300 +2279,147 @@ class MainWindow(QMainWindow):
 
         plot_style = self.wf_plot_style.currentText()
 
-        # Prepare trace data for subprocess
-        trace_data = []
-        for tr in st:
-            trace_data.append({
-                'network': tr.stats.network,
-                'station': tr.stats.station,
-                'channel': tr.stats.channel,
-                'starttime': str(tr.stats.starttime),
-                'sampling_rate': tr.stats.sampling_rate,
-                'data': tr.data.tolist()
-            })
-
-        sys.stderr.write(f"[DEBUG] Prepared {len(trace_data)} traces for plotting\n")
-        sys.stderr.flush()
-
-        # Create temporary files for data and output
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump({'traces': trace_data, 'style': plot_style}, f)
-            data_file = f.name
-
-        output_file = tempfile.mktemp(suffix='.png')
-
-        # Python script to run in subprocess
-        plot_script = '''
-import sys
-import json
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import numpy as np
-
-data_file = sys.argv[1]
-output_file = sys.argv[2]
-
-with open(data_file, 'r') as f:
-    data = json.load(f)
-
-traces = data['traces']
-style = data['style']
-
-fig, ax = plt.subplots(figsize=(12, 8))
-
-if style == "Stacked":
-    y_offset = 0
-    y_labels = []
-    y_positions = []
-    for tr in traces:
-        times = np.arange(len(tr['data'])) / tr['sampling_rate']
-        trace_data = np.array(tr['data'])
-        # Normalize for display
-        max_val = np.abs(trace_data).max()
-        if max_val > 0:
-            trace_data = trace_data / max_val
-        ax.plot(times, trace_data + y_offset, 'k-', linewidth=0.5)
-        label = f"{tr['network']}.{tr['station']}.{tr['channel']}"
-        y_labels.append(label)
-        y_positions.append(y_offset)
-        y_offset += 1.5
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Station.Channel")
-    ax.set_yticks(y_positions)
-    ax.set_yticklabels(y_labels, fontsize=8)
-    if traces:
-        ax.set_title(f"Waveforms starting at {traces[0]['starttime']}")
-    ax.grid(True, alpha=0.3)
-
-elif style == "Overlay":
-    colors = plt.cm.tab10.colors
-    for i, tr in enumerate(traces):
-        times = np.arange(len(tr['data'])) / tr['sampling_rate']
-        trace_data = np.array(tr['data'])
-        max_val = np.abs(trace_data).max()
-        if max_val > 0:
-            trace_data = trace_data / max_val
-        color = colors[i % len(colors)]
-        label = f"{tr['network']}.{tr['station']}.{tr['channel']}"
-        ax.plot(times, trace_data, color=color, linewidth=0.7, label=label, alpha=0.8)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Amplitude")
-    if traces:
-        ax.set_title(f"Waveforms starting at {traces[0]['starttime']}")
-    ax.legend(loc='upper right', fontsize=7, ncol=2)
-    ax.grid(True, alpha=0.3)
-
-else:  # Individual
-    n_traces = len(traces)
-    if n_traces > 0:
-        fig, axes = plt.subplots(n_traces, 1, figsize=(12, 2*n_traces), sharex=True)
-        if n_traces == 1:
-            axes = [axes]
-        for i, tr in enumerate(traces):
-            times = np.arange(len(tr['data'])) / tr['sampling_rate']
-            trace_data = np.array(tr['data'])
-            axes[i].plot(times, trace_data, 'k-', linewidth=0.5)
-            label = f"{tr['network']}.{tr['station']}.{tr['channel']}"
-            axes[i].set_ylabel(label, fontsize=8)
-            axes[i].grid(True, alpha=0.3)
-        axes[-1].set_xlabel("Time (s)")
-        if traces:
-            axes[0].set_title(f"Waveforms starting at {traces[0]['starttime']}")
-
-plt.savefig(output_file, dpi=100, bbox_inches='tight')
-plt.close()
-print("OK")
-'''
-
-        try:
-            sys.stderr.write("[DEBUG] Running subprocess...\n")
-            sys.stderr.flush()
-
-            # Run the plot script in a subprocess
-            result = subprocess.run(
-                [sys.executable, '-c', plot_script, data_file, output_file],
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-
-            sys.stderr.write(f"[DEBUG] Subprocess returned: {result.returncode}\n")
-            sys.stderr.flush()
-
-            if result.returncode != 0:
-                sys.stderr.write(f"[DEBUG] Subprocess stderr: {result.stderr}\n")
-                sys.stderr.flush()
-                raise RuntimeError(f"Plot subprocess failed: {result.stderr}")
-
-            # Load the generated image
-            sys.stderr.write("[DEBUG] Loading output image...\n")
-            sys.stderr.flush()
-
-            from PyQt5.QtGui import QPixmap
-            pixmap = QPixmap(output_file)
-
-            if pixmap.isNull():
-                raise RuntimeError("Failed to load generated plot image")
-
-            sys.stderr.write(f"[DEBUG] Image loaded: {pixmap.width()}x{pixmap.height()}\n")
-            sys.stderr.flush()
-
-            # Display in the QLabel
-            self.wf_image_label.setPixmap(pixmap)
-            self.logger.info(f"Plot rendered: {pixmap.width()}x{pixmap.height()} pixels")
-
-            sys.stderr.write("[DEBUG] Done!\n")
-            sys.stderr.flush()
-
-        except subprocess.TimeoutExpired:
-            self.logger.error("Plot subprocess timed out")
-            QMessageBox.warning(self, "Timeout", "Plot generation timed out.")
-        except Exception as e:
-            sys.stderr.write(f"[DEBUG] Error: {e}\n")
-            sys.stderr.flush()
-            self.logger.error(f"Plot error: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            # Clean up temporary files
-            try:
-                os.unlink(data_file)
-            except:
-                pass
-            try:
-                os.unlink(output_file)
-            except:
-                pass
-
-    def _plot_stacked(self, stream: 'Stream'):
-        """Plot waveforms in stacked/record section style."""
-        import sys
-        sys.stderr.write(f"[DEBUG] _plot_stacked: {len(stream)} traces\n")
-        sys.stderr.flush()
-
-        n_traces = len(stream)
-        if n_traces == 0:
-            return
-
-        sys.stderr.write("[DEBUG] _plot_stacked: adding subplot...\n")
-        sys.stderr.flush()
-        ax = self.wf_figure.add_subplot(111)
-        sys.stderr.write("[DEBUG] _plot_stacked: subplot added\n")
-        sys.stderr.flush()
-
-        # Group by station for better organization
-        traces_by_station = {}
-        for tr in stream:
-            sta_key = f"{tr.stats.network}.{tr.stats.station}"
-            if sta_key not in traces_by_station:
-                traces_by_station[sta_key] = []
-            traces_by_station[sta_key].append(tr)
-
-        y_offset = 0
-        y_labels = []
-        y_positions = []
-
-        for sta_key in sorted(traces_by_station.keys()):
-            traces = traces_by_station[sta_key]
-            # Sort by channel within station
-            traces.sort(key=lambda t: t.stats.channel)
-
-            for tr in traces:
-                times = tr.times()
-                data = tr.data
-
-                # Normalize for display
-                if self.wf_normalize.isChecked():
-                    data = data / (abs(data).max() + 1e-10)
-
-                sys.stderr.write(f"[DEBUG] _plot_stacked: plotting trace {sta_key}...\n")
-                sys.stderr.flush()
-                ax.plot(times, data + y_offset, 'k-', linewidth=0.5)
-                sys.stderr.write(f"[DEBUG] _plot_stacked: trace plotted\n")
-                sys.stderr.flush()
-
-                label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
-                y_labels.append(label)
-                y_positions.append(y_offset)
-
-                y_offset += 1.5  # Spacing between traces
-
-        sys.stderr.write("[DEBUG] _plot_stacked: setting axis labels...\n")
-        sys.stderr.flush()
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Station.Channel")
-        ax.set_yticks(y_positions)
-        ax.set_yticklabels(y_labels, fontsize=8)
-
-        # Add title
-        if len(stream) > 0:
-            start_time = min(tr.stats.starttime for tr in stream)
-            ax.set_title(f"Waveforms starting at {start_time}")
-
-        ax.grid(True, alpha=0.3)
-
-    def _plot_overlay(self, stream: 'Stream'):
-        """Plot all waveforms overlaid on the same axes."""
-        ax = self.wf_figure.add_subplot(111)
+        # Clear previous plots
+        self.wf_plot_widget.clear()
 
         # Define colors for different traces
-        import matplotlib.cm as cm
-        colors = cm.tab10.colors
-        for i, tr in enumerate(stream):
-            times = tr.times()
-            data = tr.data
+        colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k', 'w',
+                  (255, 128, 0), (128, 0, 255), (0, 128, 255), (255, 0, 128)]
 
-            if self.wf_normalize.isChecked():
-                data = data / (abs(data).max() + 1e-10)
+        if plot_style == "Stacked":
+            self._plot_stacked_pyqtgraph(st, colors)
+        elif plot_style == "Overlay":
+            self._plot_overlay_pyqtgraph(st, colors)
+        else:  # Individual
+            self._plot_individual_pyqtgraph(st, colors)
 
-            color = colors[i % len(colors)]
-            label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
-            ax.plot(times, data, color=color, linewidth=0.7, label=label, alpha=0.8)
+        self.logger.info(f"Plotted {len(st)} traces using pyqtgraph")
 
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Amplitude")
+    def _plot_stacked_pyqtgraph(self, stream: 'Stream', colors):
+        """Plot waveforms in stacked/record section style using pyqtgraph."""
+        import pyqtgraph as pg
+        import numpy as np
 
-        if len(stream) > 0:
-            start_time = min(tr.stats.starttime for tr in stream)
-            ax.set_title(f"Waveforms starting at {start_time}")
-
-        ax.legend(loc='upper right', fontsize=7, ncol=2)
-        ax.grid(True, alpha=0.3)
-        # Note: tight_layout() removed - causes crash with Qt5Agg backend
-
-    def _plot_individual(self, stream: 'Stream'):
-        """Plot each trace in its own subplot."""
         n_traces = len(stream)
         if n_traces == 0:
             return
 
-        # Calculate grid layout
-        n_cols = min(2, n_traces)
-        n_rows = (n_traces + n_cols - 1) // n_cols
+        # Create a single plot for stacked view
+        plot = self.wf_plot_widget.addPlot()
+        plot.setLabel('bottom', 'Time', units='s')
+        plot.showGrid(x=True, y=True, alpha=0.3)
+
+        # Get start time for title
+        if n_traces > 0:
+            start_time = min(tr.stats.starttime for tr in stream)
+            plot.setTitle(f"Waveforms starting at {start_time}")
+
+        y_offset = 0
+        y_ticks = []
 
         for i, tr in enumerate(stream):
-            ax = self.wf_figure.add_subplot(n_rows, n_cols, i + 1)
-
             times = tr.times()
-            data = tr.data
+            data = tr.data.copy()
 
-            if self.wf_normalize.isChecked():
-                data = data / (abs(data).max() + 1e-10)
+            # Normalize for display
+            max_val = np.abs(data).max()
+            if max_val > 0:
+                data = data / max_val
 
-            ax.plot(times, data, 'k-', linewidth=0.5)
+            # Plot with offset
+            pen = pg.mkPen(color='k', width=1)
+            plot.plot(times, data + y_offset, pen=pen)
+
+            # Store tick position and label
+            label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
+            y_ticks.append((y_offset, label))
+
+            y_offset += 1.5
+
+        # Set y-axis ticks
+        y_axis = plot.getAxis('left')
+        y_axis.setTicks([y_ticks])
+
+    def _plot_overlay_pyqtgraph(self, stream: 'Stream', colors):
+        """Plot all waveforms overlaid on the same axes using pyqtgraph."""
+        import pyqtgraph as pg
+        import numpy as np
+
+        n_traces = len(stream)
+        if n_traces == 0:
+            return
+
+        # Create a single plot
+        plot = self.wf_plot_widget.addPlot()
+        plot.setLabel('bottom', 'Time', units='s')
+        plot.setLabel('left', 'Amplitude')
+        plot.showGrid(x=True, y=True, alpha=0.3)
+        plot.addLegend()
+
+        # Get start time for title
+        if n_traces > 0:
+            start_time = min(tr.stats.starttime for tr in stream)
+            plot.setTitle(f"Waveforms starting at {start_time}")
+
+        for i, tr in enumerate(stream):
+            times = tr.times()
+            data = tr.data.copy()
+
+            # Normalize for display
+            max_val = np.abs(data).max()
+            if max_val > 0:
+                data = data / max_val
+
+            color = colors[i % len(colors)]
+            pen = pg.mkPen(color=color, width=1)
+            label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
+            plot.plot(times, data, pen=pen, name=label)
+
+    def _plot_individual_pyqtgraph(self, stream: 'Stream', colors):
+        """Plot each waveform in its own subplot using pyqtgraph."""
+        import pyqtgraph as pg
+        import numpy as np
+
+        n_traces = len(stream)
+        if n_traces == 0:
+            return
+
+        # Get start time for title
+        start_time = min(tr.stats.starttime for tr in stream)
+
+        # Create individual plots stacked vertically
+        prev_plot = None
+        for i, tr in enumerate(stream):
+            times = tr.times()
+            data = tr.data.copy()
+
+            # Normalize for display
+            max_val = np.abs(data).max()
+            if max_val > 0:
+                data = data / max_val
+
+            # Create plot
+            plot = self.wf_plot_widget.addPlot(row=i, col=0)
+            plot.showGrid(x=True, y=True, alpha=0.3)
 
             label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
-            ax.set_title(label, fontsize=9)
-            ax.set_xlabel("Time (s)", fontsize=8)
+            plot.setLabel('left', label)
 
-            if i % n_cols == 0:
-                ax.set_ylabel("Amplitude", fontsize=8)
+            if i == 0:
+                plot.setTitle(f"Waveforms starting at {start_time}")
+            if i == n_traces - 1:
+                plot.setLabel('bottom', 'Time', units='s')
+            else:
+                plot.hideAxis('bottom')
 
-            ax.tick_params(labelsize=7)
-            ax.grid(True, alpha=0.3)
+            # Link x-axes for synchronized zooming/panning
+            if prev_plot is not None:
+                plot.setXLink(prev_plot)
+            prev_plot = plot
 
-        # Note: tight_layout() removed - causes crash with Qt5Agg backend
+            color = colors[i % len(colors)]
+            pen = pg.mkPen(color=color, width=1)
+            plot.plot(times, data, pen=pen)
 
     # ------------------------
     # Progress handlers
