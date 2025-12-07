@@ -2190,12 +2190,7 @@ class MainWindow(QMainWindow):
 
     def _ensure_matplotlib_canvas(self) -> bool:
         """Lazily create matplotlib canvas when first needed. Returns True if successful."""
-        import sys
-
-        print("_ensure_matplotlib_canvas called", flush=True)
-
         if self.wf_canvas is not None:
-            print("Canvas already exists", flush=True)
             return True
 
         # Try to initialize matplotlib with Agg backend
@@ -2238,20 +2233,16 @@ class MainWindow(QMainWindow):
 
     def _on_wf_plot(self):
         """Plot the selected waveforms."""
-        print("_on_wf_plot called", flush=True)
-
         if not HAS_OBSPY:
             QMessageBox.warning(self, "ObsPy Required", "ObsPy is required for waveform plotting.")
             return
 
         selected_files = self._get_selected_waveform_files()
-        print(f"Selected {len(selected_files)} files", flush=True)
         if not selected_files:
             QMessageBox.warning(self, "No Selection", "Please select waveforms to plot.")
             return
 
         # Load waveforms FIRST, before creating matplotlib canvas
-        print("Loading waveforms first...", flush=True)
         self.wf_status_label.setText(f"Loading {len(selected_files)} waveforms...")
         self.btn_wf_plot.setEnabled(False)
 
@@ -2260,13 +2251,8 @@ class MainWindow(QMainWindow):
         for i, fpath in enumerate(selected_files):
             try:
                 st += read(fpath)
-                if (i + 1) % 10 == 0:
-                    print(f"Loaded {i+1}/{len(selected_files)} files", flush=True)
             except Exception as e:
                 errors.append(f"Could not read {fpath}: {e}")
-                print(f"Error: {e}", flush=True)
-
-        print(f"Waveforms loaded: {len(st)} traces", flush=True)
 
         if len(st) == 0:
             QMessageBox.warning(self, "No Data", "Could not load any waveform data.")
@@ -2277,36 +2263,26 @@ class MainWindow(QMainWindow):
             return
 
         # NOW create matplotlib canvas (after data is loaded)
-        print("Calling _ensure_matplotlib_canvas...", flush=True)
         if not self._ensure_matplotlib_canvas():
             self.btn_wf_plot.setEnabled(True)
             return
-        print("Canvas ensured, continuing...", flush=True)
 
         # Log any errors from loading
         for err in errors:
             self.logger.warning(err)
 
-        print("Calling _plot_waveforms...", flush=True)
         try:
             self._plot_waveforms(st)
-            print("Plot complete", flush=True)
         except Exception as e:
-            print(f"Error in _plot_waveforms: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+            self.logger.error(f"Error in _plot_waveforms: {e}")
             QMessageBox.warning(self, "Plot Error", f"Error plotting waveforms: {e}")
 
         self.wf_status_label.setText(f"Plotted {len(st)} traces.")
         self.btn_wf_plot.setEnabled(True)
-        print("_on_wf_plot finished", flush=True)
 
     def _plot_waveforms(self, stream: 'Stream'):
         """Plot the loaded waveforms on the matplotlib canvas."""
-        print("_plot_waveforms: starting", flush=True)
-
         # Apply processing if requested
-        print("_plot_waveforms: copying stream", flush=True)
         st = stream.copy()
 
         # Apply bandpass filter if enabled
@@ -2314,7 +2290,6 @@ class MainWindow(QMainWindow):
             try:
                 freq_min = self.wf_freq_min.value()
                 freq_max = self.wf_freq_max.value()
-                print(f"_plot_waveforms: applying filter {freq_min}-{freq_max} Hz", flush=True)
                 st.filter('bandpass', freqmin=freq_min, freqmax=freq_max, corners=4, zerophase=True)
                 self.logger.info(f"Applied bandpass filter: {freq_min}-{freq_max} Hz")
             except Exception as e:
@@ -2322,7 +2297,6 @@ class MainWindow(QMainWindow):
 
         # Sort traces
         sort_by = self.wf_sort_by.currentText()
-        print(f"_plot_waveforms: sorting by {sort_by}", flush=True)
         if sort_by == "Station Name":
             st.sort(['station'])
         elif sort_by == "Distance":
@@ -2338,70 +2312,50 @@ class MainWindow(QMainWindow):
 
         # Normalize if requested
         if self.wf_normalize.isChecked():
-            print("_plot_waveforms: normalizing", flush=True)
             for tr in st:
                 tr.normalize()
 
         # Clear figure
-        print("_plot_waveforms: clearing figure", flush=True)
         self.wf_figure.clear()
-        print("_plot_waveforms: figure cleared", flush=True)
 
         plot_style = self.wf_plot_style.currentText()
-        print(f"_plot_waveforms: plot style = {plot_style}", flush=True)
 
         if plot_style == "Stacked":
-            print("_plot_waveforms: calling _plot_stacked", flush=True)
             self._plot_stacked(st)
         elif plot_style == "Overlay":
-            print("_plot_waveforms: calling _plot_overlay", flush=True)
             self._plot_overlay(st)
         else:  # Individual
-            print("_plot_waveforms: calling _plot_individual", flush=True)
             self._plot_individual(st)
 
         # Render figure to PNG in memory and display as QPixmap
-        print("_plot_waveforms: starting render", flush=True)
         try:
             from PyQt5.QtGui import QPixmap
             from io import BytesIO
 
             # Save figure to a BytesIO buffer as PNG
-            print("_plot_waveforms: calling savefig...", flush=True)
             buf = BytesIO()
             # Avoid bbox_inches='tight' - can cause crashes on some systems
             self.wf_figure.savefig(buf, format='png', dpi=80)
-            print("_plot_waveforms: savefig complete", flush=True)
             buf.seek(0)
 
             # Load the PNG into a QPixmap
-            print("_plot_waveforms: loading QPixmap", flush=True)
             pixmap = QPixmap()
             pixmap.loadFromData(buf.getvalue())
-            print("_plot_waveforms: QPixmap loaded", flush=True)
 
             # Display in the QLabel
             self.wf_image_label.setPixmap(pixmap)
             self.logger.info(f"Plot rendered: {pixmap.width()}x{pixmap.height()} pixels")
-            print("_plot_waveforms: done", flush=True)
 
         except Exception as e:
-            print(f"_plot_waveforms: render error: {e}", flush=True)
             self.logger.error(f"Render error: {e}")
-            import traceback
-            traceback.print_exc()
 
     def _plot_stacked(self, stream: 'Stream'):
         """Plot waveforms in stacked/record section style."""
-        print("_plot_stacked: starting", flush=True)
         n_traces = len(stream)
         if n_traces == 0:
-            print("_plot_stacked: no traces, returning", flush=True)
             return
 
-        print("_plot_stacked: adding subplot", flush=True)
         ax = self.wf_figure.add_subplot(111)
-        print("_plot_stacked: subplot added", flush=True)
 
         # Group by station for better organization
         traces_by_station = {}
@@ -2410,8 +2364,6 @@ class MainWindow(QMainWindow):
             if sta_key not in traces_by_station:
                 traces_by_station[sta_key] = []
             traces_by_station[sta_key].append(tr)
-
-        print(f"_plot_stacked: grouped {len(traces_by_station)} stations", flush=True)
 
         y_offset = 0
         y_labels = []
@@ -2430,9 +2382,7 @@ class MainWindow(QMainWindow):
                 if self.wf_normalize.isChecked():
                     data = data / (abs(data).max() + 1e-10)
 
-                print(f"_plot_stacked: plotting {sta_key}", flush=True)
                 ax.plot(times, data + y_offset, 'k-', linewidth=0.5)
-                print(f"_plot_stacked: plotted {sta_key}", flush=True)
 
                 label = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.channel}"
                 y_labels.append(label)
@@ -2440,7 +2390,6 @@ class MainWindow(QMainWindow):
 
                 y_offset += 1.5  # Spacing between traces
 
-        print("_plot_stacked: setting labels", flush=True)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Station.Channel")
         ax.set_yticks(y_positions)
@@ -2451,10 +2400,7 @@ class MainWindow(QMainWindow):
             start_time = min(tr.stats.starttime for tr in stream)
             ax.set_title(f"Waveforms starting at {start_time}")
 
-        print("_plot_stacked: adding grid", flush=True)
         ax.grid(True, alpha=0.3)
-        # Note: tight_layout() removed - causes crash with Qt5Agg backend
-        print("_plot_stacked: done", flush=True)
 
     def _plot_overlay(self, stream: 'Stream'):
         """Plot all waveforms overlaid on the same axes."""

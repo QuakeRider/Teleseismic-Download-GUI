@@ -4,6 +4,11 @@ Seismic Data Downloader - Main Entry Point
 Standalone application for event/station selection and waveform downloading.
 """
 
+# IMPORTANT: Set matplotlib backend BEFORE any other imports
+# This prevents Qt from hijacking the matplotlib backend
+import matplotlib
+matplotlib.use('Agg')
+
 import sys
 import argparse
 import logging
