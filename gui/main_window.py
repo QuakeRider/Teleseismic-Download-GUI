@@ -2348,29 +2348,46 @@ class MainWindow(QMainWindow):
         else:  # Individual
             self._plot_individual(st)
 
-        # Render figure to PNG in memory and display as QPixmap
+        # Render figure to image and display as QPixmap
         sys.stderr.write("[DEBUG] Starting render...\n")
         sys.stderr.flush()
         try:
-            from PyQt5.QtGui import QPixmap
-            from io import BytesIO
+            from PyQt5.QtGui import QPixmap, QImage
+            import numpy as np
 
-            # Save figure to a BytesIO buffer as PNG
-            sys.stderr.write("[DEBUG] Calling savefig...\n")
+            # Draw the canvas to update the renderer
+            sys.stderr.write("[DEBUG] Drawing canvas...\n")
             sys.stderr.flush()
-            buf = BytesIO()
-            # Avoid bbox_inches='tight' - can cause crashes on some systems
-            self.wf_figure.savefig(buf, format='png', dpi=80)
-            sys.stderr.write("[DEBUG] savefig complete\n")
+            self.wf_agg_canvas.draw()
+            sys.stderr.write("[DEBUG] Canvas drawn\n")
             sys.stderr.flush()
-            buf.seek(0)
 
-            # Load the PNG into a QPixmap
-            sys.stderr.write("[DEBUG] Loading QPixmap...\n")
+            # Get the RGBA buffer from the canvas
+            sys.stderr.write("[DEBUG] Getting buffer...\n")
             sys.stderr.flush()
-            pixmap = QPixmap()
-            pixmap.loadFromData(buf.getvalue())
-            sys.stderr.write("[DEBUG] QPixmap loaded\n")
+            buf = self.wf_agg_canvas.buffer_rgba()
+            sys.stderr.write("[DEBUG] Buffer obtained\n")
+            sys.stderr.flush()
+
+            # Get dimensions
+            width, height = self.wf_figure.get_size_inches() * self.wf_figure.get_dpi()
+            width, height = int(width), int(height)
+            sys.stderr.write(f"[DEBUG] Dimensions: {width}x{height}\n")
+            sys.stderr.flush()
+
+            # Convert buffer to numpy array and then to QImage
+            sys.stderr.write("[DEBUG] Creating QImage...\n")
+            sys.stderr.flush()
+            arr = np.asarray(buf)
+            qimage = QImage(arr.data, width, height, QImage.Format_RGBA8888)
+            sys.stderr.write("[DEBUG] QImage created\n")
+            sys.stderr.flush()
+
+            # Convert to QPixmap
+            sys.stderr.write("[DEBUG] Converting to QPixmap...\n")
+            sys.stderr.flush()
+            pixmap = QPixmap.fromImage(qimage.copy())  # .copy() to detach from buffer
+            sys.stderr.write("[DEBUG] QPixmap created\n")
             sys.stderr.flush()
 
             # Display in the QLabel
@@ -2382,7 +2399,11 @@ class MainWindow(QMainWindow):
             self.logger.info(f"Plot rendered: {pixmap.width()}x{pixmap.height()} pixels")
 
         except Exception as e:
+            sys.stderr.write(f"[DEBUG] Render error: {e}\n")
+            sys.stderr.flush()
             self.logger.error(f"Render error: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _plot_stacked(self, stream: 'Stream'):
         """Plot waveforms in stacked/record section style."""
