@@ -1721,7 +1721,8 @@ class MainWindow(QMainWindow):
         ok = self.waveform_downloader.save_waveforms(
             self.downloaded_stream,
             output_dir=out_dir,
-            save_format=self.save_format.currentText()
+            save_format=self.save_format.currentText(),
+            mode=self.mode
         )
         if ok:
             QMessageBox.information(self, "Saved", "Waveforms saved successfully.")
