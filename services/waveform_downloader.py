@@ -571,16 +571,20 @@ class WaveformDownloader:
         self,
         stream: Stream,
         output_dir: str,
-        save_format: str = 'SAC'
+        save_format: str = 'SAC',
+        mode: str = 'event'
     ) -> bool:
         """
         Save waveforms to disk with standardized naming.
-        
+
         Args:
             stream: ObsPy Stream to save
             output_dir: Output directory
             save_format: Format to save ('SAC' or 'MSEED')
-            
+            mode: Organization mode ('event' or 'array')
+                  - 'event': organize by station (one folder per station)
+                  - 'array': organize by event_id (one folder per event)
+
         Returns:
             True if save successful
         """
@@ -589,41 +593,49 @@ class WaveformDownloader:
             # Save under 'waveforms' subdirectory for organization
             output_path = output_path / 'waveforms'
             output_path.mkdir(parents=True, exist_ok=True)
-            
-            # Group traces by event_id if available, else fallback to starttime
-            event_groups = {}
-            for tr in stream:
-                ev_id = getattr(tr.stats, 'event_id', None)
-                key = ev_id if ev_id else tr.stats.starttime.strftime("%Y%m%d_%H%M%S")
-                event_groups.setdefault(key, []).append(tr)
-            
+
+            # Group traces based on mode
+            if mode == 'event':
+                # Event mode: organize by station (network.station)
+                groups = {}
+                for tr in stream:
+                    station_key = f"{tr.stats.network}.{tr.stats.station}"
+                    groups.setdefault(station_key, []).append(tr)
+            else:
+                # Array mode: organize by event_id if available, else fallback to starttime
+                groups = {}
+                for tr in stream:
+                    ev_id = getattr(tr.stats, 'event_id', None)
+                    key = ev_id if ev_id else tr.stats.starttime.strftime("%Y%m%d_%H%M%S")
+                    groups.setdefault(key, []).append(tr)
+
             # Save each trace
             saved_count = 0
-            for key, traces in event_groups.items():
-                # Directory per event id (or time fallback)
+            for key, traces in groups.items():
+                # Create directory for this group
                 safe_key = re.sub(r'[<>:"/\\|?*]+', '_', str(key))
-                event_dir = output_path / safe_key
-                event_dir.mkdir(exist_ok=True)
-                
+                group_dir = output_path / safe_key
+                group_dir.mkdir(exist_ok=True)
+
                 for tr in traces:
                     # Generate filename
                     filename = f"{tr.stats.network}.{tr.stats.station}.{tr.stats.location}.{tr.stats.channel}"
-                    
+
                     if save_format.upper() == 'SAC':
-                        filepath = event_dir / f"{filename}.sac"
+                        filepath = group_dir / f"{filename}.sac"
                         tr.write(str(filepath), format='SAC')
                     elif save_format.upper() == 'MSEED':
-                        filepath = event_dir / f"{filename}.mseed"
+                        filepath = group_dir / f"{filename}.mseed"
                         tr.write(str(filepath), format='MSEED')
                     else:
                         self.logger.error(f"Unknown format: {save_format}")
                         return False
-                    
+
                     saved_count += 1
-            
-            self.logger.info(f"Saved {saved_count} traces to {output_dir}")
+
+            self.logger.info(f"Saved {saved_count} traces to {output_dir} (mode: {mode})")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Failed to save waveforms: {str(e)}")
             return False
